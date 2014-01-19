@@ -12,32 +12,47 @@
 
 #include "config.h"
 #include "qemu-common.h"
-#include "net.h"
+#include "net/net.h"
 #include "hw/hw.h"
-#include "hw/pc.h"
-#include "hw/pci.h"
-#include "blockdev.h"
+#include "hw/i386/pc.h"
+#include "hw/pci/pci.h"
+#include "sysemu/blockdev.h"
 #include "hw/boards.h"
-#include "kvm.h"
+#include "sysemu/kvm.h"
 #include "kvm_ppc.h"
 #include "hw/devices.h"
-#include "device_tree.h"
+#include "sysemu/device_tree.h"
 #include "hw/loader.h"
 #include "elf.h"
-#include "exec-memory.h"
-#include "hw/ppc.h"
-#include "hw/ppc4xx.h"
-#include "hw/ppc405.h"
-#include "hw/flash.h"
-#include "sysemu.h"
+#include "exec/address-spaces.h"
+#include "exec/memory.h"
+#include "hw/ppc/ppc.h"
+#include "hw/ppc/ppc4xx.h"
+#include "hw/ppc/ppc405.h"
+#include "hw/block/flash.h"
+#include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
+#include "hw/char/serial.h"
+
+/*
+#define DEBUG_L2SRAM
+#define DEBUG_EBC
+#define DEBUG_SDR
+#define DEBUG_PLB
+#define DEBUG_AHB
+*/
+#define DEBUG_I2C
 
 #define BINARY_DEVICE_TREE_FILE "sam460ex.dtb"
 #define UBOOT_FILENAME "u-boot-sam460-20100605-rebuilt.bin"
+//#define UBOOT_FILENAME "u-boot-sam460-20100605.bin"
 /* to extract the official U-Boot bin from the updater: */
 /* dd if=updater/updater-460 bs=1 skip=$(($(stat -c '%s' updater/updater-460) - 0x80000)) of=u-boot-sam460-20100605.bin */
 
 /* FIXME: I/O addresses are U-Boot's virtual addresses for now */
+
+/*  */
+#define RPA36(epa,pa) (((hwaddr)epa << 32) | pa)
 
 /* from Sam460 U-Boot include/configs/Sam460ex.h */
 #define FLASH_BASE             0xfff00000
@@ -54,6 +69,13 @@
 #define KERNEL_ADDR           0x1000000
 #define FDT_ADDR              0x1800000
 #define RAMDISK_ADDR          0x1900000
+    // Sam460ex IRQ MAP:
+    // IRQ0  = ETH_INT
+    // IRQ1  = FPGA_INT
+    // IRQ2  = PCI_INT (PCIA, PCIB, PCIC, PCIB)
+    // IRQ3  = FPGA_INT2
+    // IRQ11 = RTC_INT
+    // IRQ12 = SM502_INT
 
 /* TODO: factor this out to a header */
 #define PPC440EP_PCI_CONFIG   0xeec00000
@@ -76,11 +98,1177 @@ struct boot_info
     uint32_t entry;
 };
 
+/*****************************************************************************/
+/* L2 Cache as SRAM */
+#if 1
+/*FIXME:fix names*/
+enum {
+    DCR_L2CACHE_BASE  = 0x030,
+    DCR_L2CACHE_CFG   = DCR_L2CACHE_BASE,
+    DCR_L2CACHE_CMD,
+    DCR_L2CACHE_ADDR,
+    DCR_L2CACHE_DATA,
+    DCR_L2CACHE_STAT,
+    DCR_L2CACHE_CVER,
+    DCR_L2CACHE_SNP0,
+    DCR_L2CACHE_SNP1,
+    DCR_L2CACHE_END   = DCR_L2CACHE_SNP1,
+};
+
+/* XXX:base is 460ex-specific, cf. U-Boot, ppc4xx-isram.h */
+enum {
+    DCR_ISRAM0_BASE   = 0x020,
+    DCR_ISRAM0_SB0CR  = DCR_ISRAM0_BASE,
+    DCR_ISRAM0_SB1CR,
+    DCR_ISRAM0_SB2CR,
+    DCR_ISRAM0_SB3CR,
+    DCR_ISRAM0_BEAR,
+    DCR_ISRAM0_BESR0,
+    DCR_ISRAM0_BESR1,
+    DCR_ISRAM0_PMEG,
+    DCR_ISRAM0_CID,
+    DCR_ISRAM0_REVID,
+    DCR_ISRAM0_DPC,
+    DCR_ISRAM0_END    = DCR_ISRAM0_DPC
+};
+
+/* OCM */
+enum {
+    DCR_ISRAM1_BASE   = 0x0b0,
+    DCR_ISRAM1_SB0CR  = DCR_ISRAM1_BASE,
+    /* single bank */
+    DCR_ISRAM1_BEAR   = DCR_ISRAM1_BASE + 0x04,
+    DCR_ISRAM1_BESR0,
+    DCR_ISRAM1_BESR1,
+    DCR_ISRAM1_PMEG,
+    DCR_ISRAM1_CID,
+    DCR_ISRAM1_REVID,
+    DCR_ISRAM1_DPC,
+    DCR_ISRAM1_END    = DCR_ISRAM1_DPC
+};
+
+typedef struct ppc4xx_l2sram_t ppc4xx_l2sram_t;
+struct ppc4xx_l2sram_t {
+    MemoryRegion bank[4];
+    uint32_t l2cache[8];
+    uint32_t isram0[11];
+};
+
+#if 0
+static void l2sram_update_mappings (ppc4xx_l2sram_t *l2sram,
+                                 uint32_t isarc, uint32_t isacntl,
+                                 uint32_t dsarc, uint32_t dsacntl)
+{
+#ifdef DEBUG_L2SRAM
+    printf("L2SRAM update ISA %08" PRIx32 " %08" PRIx32 " (%08" PRIx32
+           " %08" PRIx32 ") DSA %08" PRIx32 " %08" PRIx32
+           " (%08" PRIx32 " %08" PRIx32 ")\n",
+           isarc, isacntl, dsarc, dsacntl,
+           l2sram->isarc, l2sram->isacntl, l2sram->dsarc, l2sram->dsacntl);
+#endif
+    if (l2sram->isarc != isarc ||
+        (l2sram->isacntl & 0x80000000) != (isacntl & 0x80000000)) {
+        if (l2sram->isacntl & 0x80000000) {
+            /* Unmap previously assigned memory region */
+            printf("L2SRAM unmap ISA %08" PRIx32 "\n", l2sram->isarc);
+            memory_region_del_subregion(get_system_memory(), &l2sram->isarc_ram);
+        }
+        if (isacntl & 0x80000000) {
+            /* Map new instruction memory region */
+#ifdef DEBUG_L2SRAM
+            printf("L2SRAM map ISA %08" PRIx32 "\n", isarc);
+#endif
+            memory_region_add_subregion(get_system_memory(), isarc,
+                                        &l2sram->isarc_ram);
+        }
+    }
+    if (l2sram->dsarc != dsarc ||
+        (l2sram->dsacntl & 0x80000000) != (dsacntl & 0x80000000)) {
+        if (l2sram->dsacntl & 0x80000000) {
+            /* Beware not to unmap the region we just mapped */
+            if (!(isacntl & 0x80000000) || l2sram->dsarc != isarc) {
+                /* Unmap previously assigned memory region */
+#ifdef DEBUG_L2SRAM
+                printf("L2SRAM unmap DSA %08" PRIx32 "\n", l2sram->dsarc);
+#endif
+                memory_region_del_subregion(get_system_memory(),
+                                            &l2sram->dsarc_ram);
+            }
+        }
+        if (dsacntl & 0x80000000) {
+            /* Beware not to remap the region we just mapped */
+            if (!(isacntl & 0x80000000) || dsarc != isarc) {
+                /* Map new data memory region */
+#ifdef DEBUG_L2SRAM
+                printf("L2SRAM map DSA %08" PRIx32 "\n", dsarc);
+#endif
+                memory_region_add_subregion(get_system_memory(), dsarc,
+                                            &l2sram->dsarc_ram);
+            }
+        }
+    }
+}
+#endif
+
+static uint32_t dcr_read_l2sram (void *opaque, int dcrn)
+{
+    ppc4xx_l2sram_t *l2sram;
+    uint32_t ret;
+
+    l2sram = opaque;
+    switch (dcrn) {
+    case DCR_L2CACHE_CFG:
+    case DCR_L2CACHE_CMD:
+    case DCR_L2CACHE_ADDR:
+    case DCR_L2CACHE_DATA:
+    case DCR_L2CACHE_STAT:
+    case DCR_L2CACHE_CVER:
+    case DCR_L2CACHE_SNP0:
+    case DCR_L2CACHE_SNP1:
+        ret = l2sram->l2cache[dcrn - DCR_L2CACHE_BASE];
+#ifdef DEBUG_L2SRAM
+        printf("L2SRAM: read DCR[L2CACHE+%x]: %08" PRIx32 "\n",
+               dcrn - DCR_L2CACHE_BASE, ret);
+#endif
+        break;
+
+    case DCR_ISRAM0_SB0CR:
+    case DCR_ISRAM0_SB1CR:
+    case DCR_ISRAM0_SB2CR:
+    case DCR_ISRAM0_SB3CR:
+    case DCR_ISRAM0_BEAR:
+    case DCR_ISRAM0_BESR0:
+    case DCR_ISRAM0_BESR1:
+    case DCR_ISRAM0_PMEG:
+    case DCR_ISRAM0_CID:
+    case DCR_ISRAM0_REVID:
+    case DCR_ISRAM0_DPC:
+        ret = l2sram->isram0[dcrn - DCR_ISRAM0_BASE];
+#ifdef DEBUG_L2SRAM
+        printf("L2SRAM: read DCR[ISRAM0+%x]: %08" PRIx32 "\n",
+               dcrn - DCR_ISRAM0_BASE, ret);
+#endif
+        break;
+
+    default:
+        ret = 0;
+        break;
+    }
+
+    return ret;
+}
+
+static void dcr_write_l2sram (void *opaque, int dcrn, uint32_t val)
+{
+    /*ppc4xx_l2sram_t *l2sram = opaque;*/
+    /* TODO */
+
+    switch (dcrn) {
+    case DCR_L2CACHE_CFG:
+    case DCR_L2CACHE_CMD:
+    case DCR_L2CACHE_ADDR:
+    case DCR_L2CACHE_DATA:
+    case DCR_L2CACHE_STAT:
+    case DCR_L2CACHE_CVER:
+    case DCR_L2CACHE_SNP0:
+    case DCR_L2CACHE_SNP1:
+        //l2sram->l2cache[dcrn - DCR_L2CACHE_BASE] = val;
+#ifdef DEBUG_L2SRAM
+        printf("L2SRAM: write DCR[L2CACHE+%x]: %08" PRIx32 "\n",
+               dcrn - DCR_L2CACHE_BASE, val);
+#endif
+        break;
+
+    case DCR_ISRAM0_SB0CR:
+    case DCR_ISRAM0_SB1CR:
+    case DCR_ISRAM0_SB2CR:
+    case DCR_ISRAM0_SB3CR:
+    case DCR_ISRAM0_BEAR:
+    case DCR_ISRAM0_BESR0:
+    case DCR_ISRAM0_BESR1:
+    case DCR_ISRAM0_PMEG:
+    case DCR_ISRAM0_CID:
+    case DCR_ISRAM0_REVID:
+    case DCR_ISRAM0_DPC:
+        //l2sram->isram0[dcrn - DCR_L2CACHE_BASE] = val;
+#ifdef DEBUG_L2SRAM
+        printf("L2SRAM: write DCR[ISRAM0+%x]: %08" PRIx32 "\n",
+               dcrn - DCR_ISRAM0_BASE, val);
+#endif
+        break;
+
+    case DCR_ISRAM1_SB0CR:
+    case DCR_ISRAM1_BEAR:
+    case DCR_ISRAM1_BESR0:
+    case DCR_ISRAM1_BESR1:
+    case DCR_ISRAM1_PMEG:
+    case DCR_ISRAM1_CID:
+    case DCR_ISRAM1_REVID:
+    case DCR_ISRAM1_DPC:
+        //l2sram->isram1[dcrn - DCR_L2CACHE_BASE] = val;
+#ifdef DEBUG_L2SRAM
+        printf("L2SRAM: write DCR[ISRAM1+%x]: %08" PRIx32 "\n",
+               dcrn - DCR_ISRAM1_BASE, val);
+#endif
+        break;
+    }
+    //l2sram_update_mappings(l2sram, isarc, isacntl, dsarc, dsacntl);
+}
+
+static void l2sram_reset (void *opaque)
+{
+    ppc4xx_l2sram_t *l2sram;
+//    uint32_t isarc, dsarc, isacntl, dsacntl;
+
+    l2sram = opaque;
+    memset(l2sram->l2cache, 0, sizeof(l2sram->l2cache));
+    memset(l2sram->isram0, 0, sizeof(l2sram->isram0));
+    //l2sram_update_mappings(l2sram, isarc, isacntl, dsarc, dsacntl);
+}
+
+static void ppc4xx_l2sram_init(CPUPPCState *env)
+{
+    ppc4xx_l2sram_t *l2sram;
+
+    l2sram = g_malloc0(sizeof(ppc4xx_l2sram_t));
+    /* XXX: Size is 4*64kB for 460ex, cf. U-Boot, ppc4xx-isram.h */
+    memory_region_init_ram(&l2sram->bank[0], "ppc4xx.l2sram_bank0", 64 * 1024);
+    vmstate_register_ram_global(&l2sram->bank[0]);
+    memory_region_init_ram(&l2sram->bank[1], "ppc4xx.l2sram_bank1", 64 * 1024);
+    vmstate_register_ram_global(&l2sram->bank[1]);
+    memory_region_init_ram(&l2sram->bank[2], "ppc4xx.l2sram_bank2", 64 * 1024);
+    vmstate_register_ram_global(&l2sram->bank[2]);
+    memory_region_init_ram(&l2sram->bank[3], "ppc4xx.l2sram_bank3", 64 * 1024);
+    vmstate_register_ram_global(&l2sram->bank[3]);
+    qemu_register_reset(&l2sram_reset, l2sram);
+    ppc_dcr_register(env, DCR_L2CACHE_CFG,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+
+    ppc_dcr_register(env, DCR_ISRAM0_SB0CR,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+    ppc_dcr_register(env, DCR_ISRAM0_SB1CR,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+    ppc_dcr_register(env, DCR_ISRAM0_SB2CR,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+    ppc_dcr_register(env, DCR_ISRAM0_SB3CR,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+    ppc_dcr_register(env, DCR_ISRAM0_PMEG,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+    ppc_dcr_register(env, DCR_ISRAM0_DPC,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+
+    ppc_dcr_register(env, DCR_ISRAM1_SB0CR,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+    ppc_dcr_register(env, DCR_ISRAM1_PMEG,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+    ppc_dcr_register(env, DCR_ISRAM1_DPC,
+                     l2sram, &dcr_read_l2sram, &dcr_write_l2sram);
+}
+#endif
+
+/*****************************************************************************/
+/* On Chip Memory */
+#if 0
+enum {
+    OCM0_ISARC   = 0x018,
+    OCM0_ISACNTL = 0x019,
+    OCM0_DSARC   = 0x01A,
+    OCM0_DSACNTL = 0x01B,
+};
+
+typedef struct ppc4xx_ocm_t ppc4xx_ocm_t;
+struct ppc4xx_ocm_t {
+    MemoryRegion ram;
+    MemoryRegion isarc_ram;
+    MemoryRegion dsarc_ram;
+    uint32_t isarc;
+    uint32_t isacntl;
+    uint32_t dsarc;
+    uint32_t dsacntl;
+};
+
+static void ocm_update_mappings (ppc4xx_ocm_t *ocm,
+                                 uint32_t isarc, uint32_t isacntl,
+                                 uint32_t dsarc, uint32_t dsacntl)
+{
+#ifdef DEBUG_OCM
+    printf("OCM update ISA %08" PRIx32 " %08" PRIx32 " (%08" PRIx32
+           " %08" PRIx32 ") DSA %08" PRIx32 " %08" PRIx32
+           " (%08" PRIx32 " %08" PRIx32 ")\n",
+           isarc, isacntl, dsarc, dsacntl,
+           ocm->isarc, ocm->isacntl, ocm->dsarc, ocm->dsacntl);
+#endif
+    if (ocm->isarc != isarc ||
+        (ocm->isacntl & 0x80000000) != (isacntl & 0x80000000)) {
+        if (ocm->isacntl & 0x80000000) {
+            /* Unmap previously assigned memory region */
+            printf("OCM unmap ISA %08" PRIx32 "\n", ocm->isarc);
+            memory_region_del_subregion(get_system_memory(), &ocm->isarc_ram);
+        }
+        if (isacntl & 0x80000000) {
+            /* Map new instruction memory region */
+#ifdef DEBUG_OCM
+            printf("OCM map ISA %08" PRIx32 "\n", isarc);
+#endif
+            memory_region_add_subregion(get_system_memory(), isarc,
+                                        &ocm->isarc_ram);
+        }
+    }
+    if (ocm->dsarc != dsarc ||
+        (ocm->dsacntl & 0x80000000) != (dsacntl & 0x80000000)) {
+        if (ocm->dsacntl & 0x80000000) {
+            /* Beware not to unmap the region we just mapped */
+            if (!(isacntl & 0x80000000) || ocm->dsarc != isarc) {
+                /* Unmap previously assigned memory region */
+#ifdef DEBUG_OCM
+                printf("OCM unmap DSA %08" PRIx32 "\n", ocm->dsarc);
+#endif
+                memory_region_del_subregion(get_system_memory(),
+                                            &ocm->dsarc_ram);
+            }
+        }
+        if (dsacntl & 0x80000000) {
+            /* Beware not to remap the region we just mapped */
+            if (!(isacntl & 0x80000000) || dsarc != isarc) {
+                /* Map new data memory region */
+#ifdef DEBUG_OCM
+                printf("OCM map DSA %08" PRIx32 "\n", dsarc);
+#endif
+                memory_region_add_subregion(get_system_memory(), dsarc,
+                                            &ocm->dsarc_ram);
+            }
+        }
+    }
+}
+
+static uint32_t dcr_read_ocm (void *opaque, int dcrn)
+{
+    ppc4xx_ocm_t *ocm;
+    uint32_t ret;
+
+    ocm = opaque;
+    switch (dcrn) {
+    case OCM0_ISARC:
+        ret = ocm->isarc;
+        break;
+    case OCM0_ISACNTL:
+        ret = ocm->isacntl;
+        break;
+    case OCM0_DSARC:
+        ret = ocm->dsarc;
+        break;
+    case OCM0_DSACNTL:
+        ret = ocm->dsacntl;
+        break;
+    default:
+        ret = 0;
+        break;
+    }
+
+    return ret;
+}
+
+static void dcr_write_ocm (void *opaque, int dcrn, uint32_t val)
+{
+    ppc4xx_ocm_t *ocm;
+    uint32_t isarc, dsarc, isacntl, dsacntl;
+
+    ocm = opaque;
+    isarc = ocm->isarc;
+    dsarc = ocm->dsarc;
+    isacntl = ocm->isacntl;
+    dsacntl = ocm->dsacntl;
+    switch (dcrn) {
+    case OCM0_ISARC:
+        isarc = val & 0xFC000000;
+        break;
+    case OCM0_ISACNTL:
+        isacntl = val & 0xC0000000;
+        break;
+    case OCM0_DSARC:
+        isarc = val & 0xFC000000;
+        break;
+    case OCM0_DSACNTL:
+        isacntl = val & 0xC0000000;
+        break;
+    }
+    ocm_update_mappings(ocm, isarc, isacntl, dsarc, dsacntl);
+    ocm->isarc = isarc;
+    ocm->dsarc = dsarc;
+    ocm->isacntl = isacntl;
+    ocm->dsacntl = dsacntl;
+}
+
+static void ocm_reset (void *opaque)
+{
+    ppc4xx_ocm_t *ocm;
+    uint32_t isarc, dsarc, isacntl, dsacntl;
+
+    ocm = opaque;
+    isarc = 0x00000000;
+    isacntl = 0x00000000;
+    dsarc = 0x00000000;
+    dsacntl = 0x00000000;
+    ocm_update_mappings(ocm, isarc, isacntl, dsarc, dsacntl);
+    ocm->isarc = isarc;
+    ocm->dsarc = dsarc;
+    ocm->isacntl = isacntl;
+    ocm->dsacntl = dsacntl;
+}
+
+static void ppc4xx_ocm_init(CPUPPCState *env)
+{
+    ppc4xx_ocm_t *ocm;
+
+    ocm = g_malloc0(sizeof(ppc4xx_ocm_t));
+    /* XXX: Size is 4096 or 0x04000000 */
+    memory_region_init_ram(&ocm->isarc_ram, "ppc4xx.ocm", 4096);
+    vmstate_register_ram_global(&ocm->isarc_ram);
+    memory_region_init_alias(&ocm->dsarc_ram, "ppc4xx.dsarc", &ocm->isarc_ram,
+                             0, 4096);
+    qemu_register_reset(&ocm_reset, ocm);
+    ppc_dcr_register(env, OCM0_ISARC,
+                     ocm, &dcr_read_ocm, &dcr_write_ocm);
+    ppc_dcr_register(env, OCM0_ISACNTL,
+                     ocm, &dcr_read_ocm, &dcr_write_ocm);
+    ppc_dcr_register(env, OCM0_DSARC,
+                     ocm, &dcr_read_ocm, &dcr_write_ocm);
+    ppc_dcr_register(env, OCM0_DSACNTL,
+                     ocm, &dcr_read_ocm, &dcr_write_ocm);
+}
+#endif
+
+/*****************************************************************************/
+/* External Bus Controller */
+typedef struct ppc4xx_ebc_t ppc4xx_ebc_t;
+struct ppc4xx_ebc_t {
+    uint32_t addr;
+    uint32_t bcr[8];
+    uint32_t bap[8];
+    uint32_t bear;
+    uint32_t besr0;
+    uint32_t besr1;
+    uint32_t cfg;
+};
+
+enum {
+    EBC0_CFGADDR = 0x012,
+    EBC0_CFGDATA = 0x013,
+};
+
+static uint32_t dcr_read_ebc (void *opaque, int dcrn)
+{
+    ppc4xx_ebc_t *ebc;
+    uint32_t ret;
+
+    ebc = opaque;
+    switch (dcrn) {
+    case EBC0_CFGADDR:
+        ret = ebc->addr;
+#ifdef DEBUG_EBC
+        printf("read DCR[EBCADDR]: %08" PRIx32 "\n", ret);
+#endif
+        break;
+    case EBC0_CFGDATA:
+        switch (ebc->addr) {
+        case 0x00: /* B0CR */
+            ret = ebc->bcr[0];
+            break;
+        case 0x01: /* B1CR */
+            ret = ebc->bcr[1];
+            break;
+        case 0x02: /* B2CR */
+            ret = ebc->bcr[2];
+            break;
+        case 0x03: /* B3CR */
+            ret = ebc->bcr[3];
+            break;
+        case 0x04: /* B4CR */
+            ret = ebc->bcr[4];
+            break;
+        case 0x05: /* B5CR */
+            ret = ebc->bcr[5];
+            break;
+        case 0x06: /* B6CR */
+            ret = ebc->bcr[6];
+            break;
+        case 0x07: /* B7CR */
+            ret = ebc->bcr[7];
+            break;
+        case 0x10: /* B0AP */
+            ret = ebc->bap[0];
+            break;
+        case 0x11: /* B1AP */
+            ret = ebc->bap[1];
+            break;
+        case 0x12: /* B2AP */
+            ret = ebc->bap[2];
+            break;
+        case 0x13: /* B3AP */
+            ret = ebc->bap[3];
+            break;
+        case 0x14: /* B4AP */
+            ret = ebc->bap[4];
+            break;
+        case 0x15: /* B5AP */
+            ret = ebc->bap[5];
+            break;
+        case 0x16: /* B6AP */
+            ret = ebc->bap[6];
+            break;
+        case 0x17: /* B7AP */
+            ret = ebc->bap[7];
+            break;
+        case 0x20: /* BEAR */
+            ret = ebc->bear;
+            break;
+        case 0x21: /* BESR0 */
+            ret = ebc->besr0;
+            break;
+        case 0x22: /* BESR1 */
+            ret = ebc->besr1;
+            break;
+        case 0x23: /* CFG */
+            ret = ebc->cfg;
+            break;
+        default:
+            ret = 0x00000000;
+            break;
+        }
+#ifdef DEBUG_EBC
+        printf("read DCR[EBCDATA]: %08" PRIx32 "\n", ret);
+#endif
+        break;
+    default:
+        ret = 0x00000000;
+        break;
+    }
+
+    return ret;
+}
+
+static void dcr_write_ebc (void *opaque, int dcrn, uint32_t val)
+{
+    ppc4xx_ebc_t *ebc;
+
+    ebc = opaque;
+    switch (dcrn) {
+    case EBC0_CFGADDR:
+        ebc->addr = val;
+#ifdef DEBUG_EBC
+        printf("write DCR[EBCADDR]: %08" PRIx32 "\n", val);
+#endif
+        break;
+    case EBC0_CFGDATA:
+#ifdef DEBUG_EBC
+        printf("write DCR[EBCDATA]: %08" PRIx32 "\n", val);
+#endif
+        switch (ebc->addr) {
+        case 0x00: /* B0CR */
+            break;
+        case 0x01: /* B1CR */
+            break;
+        case 0x02: /* B2CR */
+            break;
+        case 0x03: /* B3CR */
+            break;
+        case 0x04: /* B4CR */
+            break;
+        case 0x05: /* B5CR */
+            break;
+        case 0x06: /* B6CR */
+            break;
+        case 0x07: /* B7CR */
+            break;
+        case 0x10: /* B0AP */
+            break;
+        case 0x11: /* B1AP */
+            break;
+        case 0x12: /* B2AP */
+            break;
+        case 0x13: /* B3AP */
+            break;
+        case 0x14: /* B4AP */
+            break;
+        case 0x15: /* B5AP */
+            break;
+        case 0x16: /* B6AP */
+            break;
+        case 0x17: /* B7AP */
+            break;
+        case 0x20: /* BEAR */
+            break;
+        case 0x21: /* BESR0 */
+            break;
+        case 0x22: /* BESR1 */
+            break;
+        case 0x23: /* CFG */
+            break;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void ebc_reset (void *opaque)
+{
+    ppc4xx_ebc_t *ebc;
+    int i;
+
+    ebc = opaque;
+    ebc->addr = 0x00000000;
+    ebc->bap[0] = 0x7F8FFE80;
+    ebc->bcr[0] = 0xFFE28000;
+    for (i = 0; i < 8; i++) {
+        ebc->bap[i] = 0x00000000;
+        ebc->bcr[i] = 0x00000000;
+    }
+    ebc->besr0 = 0x00000000;
+    ebc->besr1 = 0x00000000;
+    ebc->cfg = 0x80400000;
+}
+
+static void ppc4xx_ebc_init(CPUPPCState *env)
+{
+    ppc4xx_ebc_t *ebc;
+
+    ebc = g_malloc0(sizeof(ppc4xx_ebc_t));
+    qemu_register_reset(&ebc_reset, ebc);
+    ppc_dcr_register(env, EBC0_CFGADDR,
+                     ebc, &dcr_read_ebc, &dcr_write_ebc);
+    ppc_dcr_register(env, EBC0_CFGDATA,
+                     ebc, &dcr_read_ebc, &dcr_write_ebc);
+}
+
+/*****************************************************************************/
+/* System DCRs */
+typedef struct ppc4xx_sdr_t ppc4xx_sdr_t;
+struct ppc4xx_sdr_t {
+    uint32_t addr;
+    uint32_t bcr[8];
+    uint32_t bap[8];
+    uint32_t bear;
+    uint32_t besr0;
+    uint32_t besr1;
+    uint32_t cfg;
+};
+
+enum {
+    SDR0_CFGADDR = 0x00e,
+    SDR0_CFGDATA = 0x00f,
+};
+
+static uint32_t dcr_read_sdr (void *opaque, int dcrn)
+{
+    ppc4xx_sdr_t *sdr;
+    uint32_t ret;
+
+    sdr = opaque;
+    switch (dcrn) {
+    case SDR0_CFGADDR:
+        ret = sdr->addr;
+#ifdef DEBUG_SDR
+        printf("read DCR[SDRADDR]: %08" PRIx32 "\n", ret);
+#endif
+        break;
+    case SDR0_CFGDATA:
+        switch (sdr->addr) {
+        default:
+            ret = 0x00000000;
+            break;
+        }
+#ifdef DEBUG_SDR
+        printf("read DCR[SDRDATA]: %08" PRIx32 "\n", ret);
+#endif
+        break;
+    default:
+        ret = 0x00000000;
+        break;
+    }
+
+    return ret;
+}
+
+static void dcr_write_sdr (void *opaque, int dcrn, uint32_t val)
+{
+    ppc4xx_sdr_t *sdr;
+
+    sdr = opaque;
+    switch (dcrn) {
+    case SDR0_CFGADDR:
+        sdr->addr = val;
+#ifdef DEBUG_SDR
+        printf("write DCR[SDRADDR]: %08" PRIx32 "\n", val);
+#endif
+        break;
+    case SDR0_CFGDATA:
+#ifdef DEBUG_SDR
+        printf("write DCR[SDRDATA]: %08" PRIx32 "\n", val);
+#endif
+        switch (sdr->addr) {
+        case 0x00: /* B0CR */
+            break;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void sdr_reset (void *opaque)
+{
+    ppc4xx_sdr_t *sdr;
+    int i;
+
+    sdr = opaque;
+    sdr->addr = 0x00000000;
+    sdr->bap[0] = 0x7F8FFE80;
+    sdr->bcr[0] = 0xFFE28000;
+    for (i = 0; i < 8; i++) {
+        sdr->bap[i] = 0x00000000;
+        sdr->bcr[i] = 0x00000000;
+    }
+    sdr->besr0 = 0x00000000;
+    sdr->besr1 = 0x00000000;
+    sdr->cfg = 0x80400000;
+}
+
+static void ppc4xx_sdr_init(CPUPPCState *env)
+{
+    ppc4xx_sdr_t *sdr;
+
+    sdr = g_malloc0(sizeof(ppc4xx_sdr_t));
+    qemu_register_reset(&sdr_reset, sdr);
+    ppc_dcr_register(env, SDR0_CFGADDR,
+                     sdr, &dcr_read_sdr, &dcr_write_sdr);
+    ppc_dcr_register(env, SDR0_CFGDATA,
+                     sdr, &dcr_read_sdr, &dcr_write_sdr);
+}
+
+/*****************************************************************************/
+/* Peripheral local bus arbitrer */
+/* TODO: read & write all regs */
+enum {
+    PLB3A0_ACR = 0x077,
+    PLB4A0_ACR = 0x081,
+    PLB0_BESR  = 0x084,
+    PLB0_BEAR  = 0x086,
+    PLB0_ACR   = 0x087,
+    PLB4A1_ACR = 0x089
+};
+
+typedef struct ppc4xx_plb_t ppc4xx_plb_t;
+struct ppc4xx_plb_t {
+    uint32_t acr;
+    uint32_t bear;
+    uint32_t besr;
+};
+
+static uint32_t dcr_read_plb (void *opaque, int dcrn)
+{
+    ppc4xx_plb_t *plb;
+    uint32_t ret;
+
+    plb = opaque;
+    switch (dcrn) {
+    case PLB0_ACR:
+        ret = plb->acr;
+        break;
+    case PLB0_BEAR:
+        ret = plb->bear;
+        break;
+    case PLB0_BESR:
+        ret = plb->besr;
+        break;
+    default:
+        /* Avoid gcc warning */
+        ret = 0;
+        break;
+    }
+#ifdef DEBUG_PLB
+    printf("read DCR[PLB+%x]: %08" PRIx32 "\n", dcrn - 0x80, ret);
+#endif
+
+    return ret;
+}
+
+static void dcr_write_plb (void *opaque, int dcrn, uint32_t val)
+{
+    ppc4xx_plb_t *plb;
+
+    plb = opaque;
+#ifdef DEBUG_PLB
+    printf("write DCR[PLB+%x]: %08" PRIx32 "\n", dcrn - 0x80, val);
+#endif
+    switch (dcrn) {
+    case PLB0_ACR:
+        /* We don't care about the actual parameters written as
+         * we don't manage any priorities on the bus
+         */
+        plb->acr = val & 0xF8000000;
+        break;
+    case PLB0_BEAR:
+        /* Read only */
+        break;
+    case PLB0_BESR:
+        /* Write-clear */
+        plb->besr &= ~val;
+        break;
+    }
+}
+
+static void ppc4xx_plb_reset (void *opaque)
+{
+    ppc4xx_plb_t *plb;
+
+    plb = opaque;
+    plb->acr = 0x00000000;
+    plb->bear = 0x00000000;
+    plb->besr = 0x00000000;
+}
+
+static void ppc4xx_plb_init(CPUPPCState *env)
+{
+    ppc4xx_plb_t *plb;
+
+    plb = g_malloc0(sizeof(ppc4xx_plb_t));
+    ppc_dcr_register(env, PLB3A0_ACR, plb, &dcr_read_plb, &dcr_write_plb);
+    ppc_dcr_register(env, PLB4A0_ACR, plb, &dcr_read_plb, &dcr_write_plb);
+    ppc_dcr_register(env, PLB0_ACR, plb, &dcr_read_plb, &dcr_write_plb);
+    ppc_dcr_register(env, PLB0_BEAR, plb, &dcr_read_plb, &dcr_write_plb);
+    ppc_dcr_register(env, PLB0_BESR, plb, &dcr_read_plb, &dcr_write_plb);
+    ppc_dcr_register(env, PLB4A1_ACR, plb, &dcr_read_plb, &dcr_write_plb);
+    qemu_register_reset(ppc4xx_plb_reset, plb);
+}
+
+/*****************************************************************************/
+/* PLB to AHB bridge */
+enum {
+    AHB_TOP    = 0x0A4,
+    AHB_BOT    = 0x0A5,
+};
+
+typedef struct ppc4xx_ahb_t ppc4xx_ahb_t;
+struct ppc4xx_ahb_t {
+    uint32_t top;
+    uint32_t bot;
+};
+
+static uint32_t dcr_read_ahb (void *opaque, int dcrn)
+{
+    ppc4xx_ahb_t *ahb;
+    uint32_t ret;
+
+    ahb = opaque;
+    switch (dcrn) {
+    case AHB_TOP:
+        ret = ahb->top;
+        break;
+    case AHB_BOT:
+        ret = ahb->bot;
+        break;
+    default:
+        /* Avoid gcc warning */
+        ret = 0;
+        break;
+    }
+#ifdef DEBUG_AHB
+    printf("read DCR[AHB+%x]: %08" PRIx32 "\n", dcrn - 0xA0, ret);
+#endif
+
+    return ret;
+}
+
+static void dcr_write_ahb (void *opaque, int dcrn, uint32_t val)
+{
+    ppc4xx_ahb_t *ahb;
+
+    ahb = opaque;
+#ifdef DEBUG_AHB
+    printf("write DCR[AHB+%x]: %08" PRIx32 "\n", dcrn - 0xA0, val);
+#endif
+    switch (dcrn) {
+    case AHB_TOP:
+        ahb->top = val;
+        break;
+    case AHB_BOT:
+        ahb->bot = val;
+        break;
+    }
+}
+
+static void ppc4xx_ahb_reset (void *opaque)
+{
+    ppc4xx_ahb_t *ahb;
+
+    ahb = opaque;
+    /* No error */
+    ahb->top = 0x00000000;
+    ahb->bot = 0x00000000;
+}
+
+static void ppc4xx_ahb_init(CPUPPCState *env)
+{
+    ppc4xx_ahb_t *ahb;
+
+    ahb = g_malloc0(sizeof(ppc4xx_ahb_t));
+    ppc_dcr_register(env, AHB_TOP, ahb, &dcr_read_ahb, &dcr_write_ahb);
+    ppc_dcr_register(env, AHB_BOT, ahb, &dcr_read_ahb, &dcr_write_ahb);
+    qemu_register_reset(ppc4xx_ahb_reset, ahb);
+}
+
+/*****************************************************************************/
+/* I2C controller */
+typedef struct ppc4xx_i2c_t ppc4xx_i2c_t;
+struct ppc4xx_i2c_t {
+    qemu_irq irq;
+    MemoryRegion iomem;
+    uint8_t mdata;
+    uint8_t lmadr;
+    uint8_t hmadr;
+    uint8_t cntl;
+    uint8_t mdcntl;
+    uint8_t sts;
+    uint8_t extsts;
+    uint8_t sdata;
+    uint8_t lsadr;
+    uint8_t hsadr;
+    uint8_t clkdiv;
+    uint8_t intrmsk;
+    uint8_t xfrcnt;
+    uint8_t xtcntlss;
+    uint8_t directcntl;
+};
+
+static uint32_t ppc4xx_i2c_readb (void *opaque, hwaddr addr)
+{
+    ppc4xx_i2c_t *i2c;
+    uint32_t ret;
+
+#ifdef DEBUG_I2C
+    printf("%s: addr " TARGET_FMT_plx "\n", __func__, addr);
+#endif
+    i2c = opaque;
+    switch (addr) {
+    case 0x00:
+        //        i2c_readbyte(&i2c->mdata);
+        ret = i2c->mdata;
+        break;
+    case 0x02:
+        ret = i2c->sdata;
+        break;
+    case 0x04:
+        ret = i2c->lmadr;
+        break;
+    case 0x05:
+        ret = i2c->hmadr;
+        break;
+    case 0x06:
+        ret = i2c->cntl;
+        break;
+    case 0x07:
+        ret = i2c->mdcntl;
+        break;
+    case 0x08:
+        ret = i2c->sts;
+        break;
+    case 0x09:
+        ret = i2c->extsts;
+        break;
+    case 0x0A:
+        ret = i2c->lsadr;
+        break;
+    case 0x0B:
+        ret = i2c->hsadr;
+        break;
+    case 0x0C:
+        ret = i2c->clkdiv;
+        break;
+    case 0x0D:
+        ret = i2c->intrmsk;
+        break;
+    case 0x0E:
+        ret = i2c->xfrcnt;
+        break;
+    case 0x0F:
+        ret = i2c->xtcntlss;
+        break;
+    case 0x10:
+        ret = i2c->directcntl;
+        break;
+    default:
+        ret = 0x00;
+        break;
+    }
+#ifdef DEBUG_I2C
+    printf("%s: addr " TARGET_FMT_plx " %02" PRIx32 "\n", __func__, addr, ret);
+#endif
+
+    return ret;
+}
+
+static void ppc4xx_i2c_writeb (void *opaque,
+                               hwaddr addr, uint32_t value)
+{
+    ppc4xx_i2c_t *i2c;
+
+#ifdef DEBUG_I2C
+    printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
+           value);
+#endif
+    i2c = opaque;
+    switch (addr) {
+    case 0x00:
+        i2c->mdata = value;
+        //        i2c_sendbyte(&i2c->mdata);
+        break;
+    case 0x02:
+        i2c->sdata = value;
+        break;
+    case 0x04:
+        i2c->lmadr = value;
+        break;
+    case 0x05:
+        i2c->hmadr = value;
+        break;
+    case 0x06:
+        i2c->cntl = value;
+        break;
+    case 0x07:
+        i2c->mdcntl = value & 0xDF;
+        break;
+    case 0x08:
+        i2c->sts &= ~(value & 0x0A);
+        break;
+    case 0x09:
+        i2c->extsts &= ~(value & 0x8F);
+        break;
+    case 0x0A:
+        i2c->lsadr = value;
+        break;
+    case 0x0B:
+        i2c->hsadr = value;
+        break;
+    case 0x0C:
+        i2c->clkdiv = value;
+        break;
+    case 0x0D:
+        i2c->intrmsk = value;
+        break;
+    case 0x0E:
+        i2c->xfrcnt = value & 0x77;
+        break;
+    case 0x0F:
+        i2c->xtcntlss = value;
+        break;
+    case 0x10:
+        i2c->directcntl = value & 0x7;
+        break;
+    }
+}
+
+static uint32_t ppc4xx_i2c_readw (void *opaque, hwaddr addr)
+{
+    uint32_t ret;
+
+#ifdef DEBUG_I2C
+    printf("%s: addr " TARGET_FMT_plx "\n", __func__, addr);
+#endif
+    ret = ppc4xx_i2c_readb(opaque, addr) << 8;
+    ret |= ppc4xx_i2c_readb(opaque, addr + 1);
+
+    return ret;
+}
+
+static void ppc4xx_i2c_writew (void *opaque,
+                               hwaddr addr, uint32_t value)
+{
+#ifdef DEBUG_I2C
+    printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
+           value);
+#endif
+    ppc4xx_i2c_writeb(opaque, addr, value >> 8);
+    ppc4xx_i2c_writeb(opaque, addr + 1, value);
+}
+
+static uint32_t ppc4xx_i2c_readl (void *opaque, hwaddr addr)
+{
+    uint32_t ret;
+
+#ifdef DEBUG_I2C
+    printf("%s: addr " TARGET_FMT_plx "\n", __func__, addr);
+#endif
+    ret = ppc4xx_i2c_readb(opaque, addr) << 24;
+    ret |= ppc4xx_i2c_readb(opaque, addr + 1) << 16;
+    ret |= ppc4xx_i2c_readb(opaque, addr + 2) << 8;
+    ret |= ppc4xx_i2c_readb(opaque, addr + 3);
+
+    return ret;
+}
+
+static void ppc4xx_i2c_writel (void *opaque,
+                               hwaddr addr, uint32_t value)
+{
+#ifdef DEBUG_I2C
+    printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
+           value);
+#endif
+    ppc4xx_i2c_writeb(opaque, addr, value >> 24);
+    ppc4xx_i2c_writeb(opaque, addr + 1, value >> 16);
+    ppc4xx_i2c_writeb(opaque, addr + 2, value >> 8);
+    ppc4xx_i2c_writeb(opaque, addr + 3, value);
+}
+
+static const MemoryRegionOps i2c_ops = {
+    .old_mmio = {
+        .read = { ppc4xx_i2c_readb, ppc4xx_i2c_readw, ppc4xx_i2c_readl, },
+        .write = { ppc4xx_i2c_writeb, ppc4xx_i2c_writew, ppc4xx_i2c_writel, },
+    },
+    .endianness = DEVICE_NATIVE_ENDIAN,
+};
+
+static void ppc4xx_i2c_reset (void *opaque)
+{
+    ppc4xx_i2c_t *i2c;
+
+    i2c = opaque;
+    i2c->mdata = 0x00;
+    i2c->sdata = 0x00;
+    i2c->cntl = 0x00;
+    i2c->mdcntl = 0x00;
+    i2c->sts = 0x00;
+    i2c->extsts = 0x00;
+    i2c->clkdiv = 0x00;
+    i2c->xfrcnt = 0x00;
+    i2c->directcntl = 0x0F;
+}
+
+static void ppc4xx_i2c_init(hwaddr base, qemu_irq irq)
+{
+    ppc4xx_i2c_t *i2c;
+
+    i2c = g_malloc0(sizeof(ppc4xx_i2c_t));
+    i2c->irq = irq;
+#ifdef DEBUG_I2C
+    printf("%s: offset " TARGET_FMT_plx "\n", __func__, base);
+#endif
+    memory_region_init_io(&i2c->iomem, &i2c_ops, i2c, "i2c", 0x011);
+    memory_region_add_subregion(get_system_memory(), base, &i2c->iomem);
+    qemu_register_reset(ppc4xx_i2c_reset, i2c);
+}
+
+/*****************************************************************************/
+
 static int sam460ex_load_uboot(void)
 {
     DriveInfo *dinfo;
     BlockDriverState *dstate = NULL;
-    target_phys_addr_t base = FLASH_BASE | ((target_phys_addr_t)FLASH_BASE_H << 32);
+    hwaddr base = FLASH_BASE | ((hwaddr)FLASH_BASE_H << 32);
 
     dinfo = drive_get(IF_PFLASH, 0, 0);
     if (dinfo) {
@@ -99,21 +1287,21 @@ static int sam460ex_load_uboot(void)
     if (!dstate) {
         /*fprintf(stderr, "No flash image given with the 'pflash' parameter,"
                 " using default u-boot image\n");*/
-        base = UBOOT_LOAD_BASE | ((target_phys_addr_t)FLASH_BASE_H << 32);
+        base = UBOOT_LOAD_BASE | ((hwaddr)FLASH_BASE_H << 32);
         rom_add_file_fixed(UBOOT_FILENAME, base, -1);
     }
 
     return 0;
 }
 
-static int sam460ex_load_device_tree(target_phys_addr_t addr,
+static int sam460ex_load_device_tree(hwaddr addr,
                                      uint32_t ramsize,
-                                     target_phys_addr_t initrd_base,
-                                     target_phys_addr_t initrd_size,
+                                     hwaddr initrd_base,
+                                     hwaddr initrd_size,
                                      const char *kernel_cmdline)
 {
     int ret = -1;
-    uint32_t mem_reg_property[] = { 0, 0, ramsize };
+    uint32_t mem_reg_property[] = { 0, 0, cpu_to_be32(ramsize) };
     char *filename;
     int fdt_size;
     void *fdt;
@@ -200,10 +1388,11 @@ static void mmubooke_create_initial_mapping_uboot(CPUPPCState *env)
 /* Create reset TLB entries for BookE, spanning the 32bit addr space.  */
 static void mmubooke_create_initial_mapping(CPUPPCState *env,
                                      target_ulong va,
-                                     target_phys_addr_t pa)
+                                     hwaddr pa)
 {
     //struct boot_info *bi = env->load_info;
     ppcemb_tlb_t *tlb = &env->tlb.tlbe[0];
+    int i = 1;
 
     tlb->attr = 0;
     tlb->prot = PAGE_VALID | ((PAGE_READ | PAGE_WRITE | PAGE_EXEC) << 4);
@@ -212,12 +1401,33 @@ static void mmubooke_create_initial_mapping(CPUPPCState *env,
     tlb->RPN = pa & TARGET_PAGE_MASK;
     tlb->PID = 0;
 
-    tlb = &env->tlb.tlbe[1];
+#if 0
+    tlb = &env->tlb.tlbe[i++];
     tlb->attr = 0;
     tlb->prot = PAGE_VALID | ((PAGE_READ | PAGE_WRITE | PAGE_EXEC) << 4);
     tlb->size = 1 << 31; /* up to 0xffffffff  */
     tlb->EPN = 0x80000000 & TARGET_PAGE_MASK;
     tlb->RPN = 0x80000000 & TARGET_PAGE_MASK;
+    tlb->PID = 0;
+#endif
+
+    /* MAP some IO space including the UART.
+       Linux doesn't need it, but Haiku does, for now */
+    tlb = &env->tlb.tlbe[i++];
+    tlb->attr = 0;
+    tlb->prot = PAGE_VALID | ((PAGE_READ | PAGE_WRITE) << 4);
+    tlb->size = 1 << 24; /* 16MB  */
+    tlb->EPN = 0xef000000 & TARGET_PAGE_MASK;
+    tlb->RPN = (0xef000000 & TARGET_PAGE_MASK) | 0x4;
+    tlb->PID = 0;
+
+	/* HACK: just for testing */
+    tlb = &env->tlb.tlbe[i++];
+    tlb->attr = 0;
+    tlb->prot = PAGE_VALID | ((PAGE_READ | PAGE_WRITE) << 4);
+    tlb->size = 1 << 24; /* 16MB  */
+    tlb->EPN = 0x80000000 & TARGET_PAGE_MASK;
+    tlb->RPN = (0x80000000 & TARGET_PAGE_MASK) | 0x4;
     tlb->PID = 0;
 }
 
@@ -229,7 +1439,7 @@ static void main_cpu_reset(void *opaque)
 
     cpu_reset(CPU(cpu));
 
-	/* either we have a kernel to boot or we jump to U-Boot */
+    /* either we have a kernel to boot or we jump to U-Boot */
     if (bi->entry != UBOOT_ENTRY) {
         env->gpr[1] = (16<<20) - 8;
         env->gpr[3] = FDT_ADDR;
@@ -249,19 +1459,16 @@ static void main_cpu_reset(void *opaque)
     }
 }
 
-static void sam460ex_init(ram_addr_t ram_size,
-                        const char *boot_device,
-                        const char *kernel_filename,
-                        const char *kernel_cmdline,
-                        const char *initrd_filename,
-                        const char *cpu_model)
+static void sam460ex_init(QEMUMachineInitArgs *args)
 {
     unsigned int pci_irq_nrs[4] = { 28, 27, 26, 25 };
     MemoryRegion *address_space_mem = get_system_memory();
     MemoryRegion *ram_memories
         = g_malloc(PPC440EP_SDRAM_NR_BANKS * sizeof(*ram_memories));
-    target_phys_addr_t ram_bases[PPC440EP_SDRAM_NR_BANKS];
-    target_phys_addr_t ram_sizes[PPC440EP_SDRAM_NR_BANKS];
+    hwaddr ram_bases[PPC440EP_SDRAM_NR_BANKS];
+    hwaddr ram_sizes[PPC440EP_SDRAM_NR_BANKS];
+    MemoryRegion *l2cache_ram = g_new(MemoryRegion, 1);
+    MemoryRegion *ocm_ram = g_new(MemoryRegion, 1);
     qemu_irq *pic;
     qemu_irq *irqs;
     PCIBus *pcibus;
@@ -269,8 +1476,8 @@ static void sam460ex_init(ram_addr_t ram_size,
     CPUPPCState *env;
     uint64_t elf_entry;
     uint64_t elf_lowaddr;
-    target_phys_addr_t entry = UBOOT_ENTRY;
-    target_phys_addr_t loadaddr = 0;
+    hwaddr entry = UBOOT_ENTRY;
+    hwaddr loadaddr = 0;
     target_long initrd_size = 0;
     DeviceState *dev;
     int success;
@@ -278,10 +1485,10 @@ static void sam460ex_init(ram_addr_t ram_size,
     struct boot_info *boot_info;
 
     /* Setup CPU. */
-    if (cpu_model == NULL) {
-        cpu_model = "440EP";
+    if (args->cpu_model == NULL) {
+        args->cpu_model = "440EP";
     }
-    cpu = cpu_ppc_init(cpu_model);
+    cpu = cpu_ppc_init(args->cpu_model);
     if (cpu == NULL) {
         fprintf(stderr, "Unable to initialize CPU!\n");
         exit(1);
@@ -292,8 +1499,11 @@ static void sam460ex_init(ram_addr_t ram_size,
     boot_info = g_malloc0(sizeof(struct boot_info));
     env->load_info = boot_info;
 
-    ppc_booke_timers_init(env, 400000000, 0);
+    ppc_booke_timers_init(cpu, 400000000, 0);
     ppc_dcr_init(env, NULL, NULL);
+
+    /* PLB arbitrer */
+    ppc4xx_plb_init(env);
 
     /* interrupt controller */
     irqs = g_malloc0(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
@@ -301,16 +1511,52 @@ static void sam460ex_init(ram_addr_t ram_size,
     irqs[PPCUIC_OUTPUT_CINT] = ((qemu_irq *)env->irq_inputs)[PPC40x_INPUT_CINT];
     pic = ppcuic_init(env, irqs, 0x0C0, 0, 1);
 
+    /*FIXME*/
+    irqs = g_malloc0(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
+    /*pic =*/ ppcuic_init(env, irqs, 0x0D0, 0, 1);
+    irqs = g_malloc0(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
+    /*pic =*/ ppcuic_init(env, irqs, 0x0E0, 0, 1);
+    irqs = g_malloc0(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
+    /*pic =*/ ppcuic_init(env, irqs, 0x0F0, 0, 1);
+
     /* SDRAM controller */
     memset(ram_bases, 0, sizeof(ram_bases));
     memset(ram_sizes, 0, sizeof(ram_sizes));
-    ram_size = ppc4xx_sdram_adjust(ram_size, PPC440EP_SDRAM_NR_BANKS,
+    args->ram_size = ppc4xx_sdram_adjust(args->ram_size,
+                                   PPC440EP_SDRAM_NR_BANKS,
                                    ram_memories,
                                    ram_bases, ram_sizes,
                                    ppc440ep_sdram_bank_sizes);
+printf("RAMSIZE %dMB\n", (int)(args->ram_size / (1024 * 1024)));
+
     /* XXX 440EP's ECC interrupts are on UIC1, but we've only created UIC0. */
     ppc4xx_sdram_init(env, pic[14], PPC440EP_SDRAM_NR_BANKS, ram_memories,
                       ram_bases, ram_sizes, 1);
+
+    /* External bus controller */
+    ppc4xx_ebc_init(env);
+    /* PLB to AHB bridge */
+    ppc4xx_ahb_init(env);
+
+    /* System DCRs */
+    ppc4xx_sdr_init(env);
+
+    /* 256K of L2 cache as memory */
+    ppc4xx_l2sram_init(env);
+    /* FIXME:remove this */
+    memory_region_init_ram(l2cache_ram, "ppc440.l2cache_ram", 256 << 10);
+    vmstate_register_ram_global(l2cache_ram);
+    memory_region_add_subregion(address_space_mem, 0x400000000LL, l2cache_ram);
+
+    /* 64K of on-chip memory */
+    memory_region_init_ram(ocm_ram, "ppc440.ocm_ram", 64 << 10);
+    vmstate_register_ram_global(ocm_ram);
+    memory_region_add_subregion(address_space_mem, 0x400040000LL, ocm_ram);
+
+    /* IIC controller */
+    /* FIXME: irq? */
+    ppc4xx_i2c_init(0x4ef600700LL, pic[2]);
+    ppc4xx_i2c_init(0x4ef600800LL, pic[2]);
 
     /* PCI */
     dev = sysbus_create_varargs("ppc4xx-pcihost", PPC440EP_PCI_CONFIG,
@@ -323,15 +1569,16 @@ static void sam460ex_init(ram_addr_t ram_size,
         exit(1);
     }
 
+#if 0
     sm501_init(address_space_mem, 0x10000000, SM501_VRAM_SIZE,
                /*irq[SM501]FIXME*/pic[13], serial_hds[2]);
-
+#endif
 
     isa_mmio_init(PPC440EP_PCI_IO, PPC440EP_PCI_IOLEN);
 
     /* Core has 4 UARTs but the board only has one wired */
     if (serial_hds[0] != NULL) {
-        serial_mm_init(address_space_mem, 0xef600300, 0, pic[0],
+        serial_mm_init(address_space_mem, 0x4ef600300, 0, pic[0],
                        PPC_SERIAL_MM_BAUDBASE, serial_hds[0],
                        DEVICE_BIG_ENDIAN);
     }
@@ -346,7 +1593,7 @@ static void sam460ex_init(ram_addr_t ram_size,
     }
 
     /* Load U-Boot image. */
-    if (!kernel_filename) {
+    if (!args->kernel_filename) {
         success = sam460ex_load_uboot();
         if (success < 0) {
             fprintf(stderr, "qemu: could not load firmware\n");
@@ -355,11 +1602,11 @@ static void sam460ex_init(ram_addr_t ram_size,
     }
 
     /* Load kernel. */
-    if (kernel_filename) {
-        success = load_uimage(kernel_filename, &entry, &loadaddr, NULL);
+    if (args->kernel_filename) {
+        success = load_uimage(args->kernel_filename, &entry, &loadaddr, NULL);
         fprintf(stderr, "load_uimage: %d\n", success);
         if (success < 0) {
-            success = load_elf(kernel_filename, NULL, NULL, &elf_entry,
+            success = load_elf(args->kernel_filename, NULL, NULL, &elf_entry,
                                &elf_lowaddr, NULL, 1, ELF_MACHINE, 0);
             entry = elf_entry;
             loadaddr = elf_lowaddr;
@@ -367,29 +1614,30 @@ static void sam460ex_init(ram_addr_t ram_size,
         /* XXX try again as binary */
         if (success < 0) {
             fprintf(stderr, "qemu: could not load kernel '%s'\n",
-                    kernel_filename);
+                    args->kernel_filename);
             exit(1);
         }
     }
 
     /* Load initrd. */
-    if (initrd_filename) {
-        initrd_size = load_image_targphys(initrd_filename, RAMDISK_ADDR,
-                                          ram_size - RAMDISK_ADDR);
+    if (args->initrd_filename) {
+        initrd_size = load_image_targphys(args->initrd_filename, RAMDISK_ADDR,
+                                          args->ram_size - RAMDISK_ADDR);
 
         if (initrd_size < 0) {
             fprintf(stderr, "qemu: could not load ram disk '%s' at %x\n",
-                    initrd_filename, RAMDISK_ADDR);
+                    args->initrd_filename, RAMDISK_ADDR);
             exit(1);
         }
     }
 
     /* If we're loading a kernel directly, we must load the device tree too. */
-    if (kernel_filename) {
+    if (args->kernel_filename) {
         int dt_size;
 
-        dt_size = sam460ex_load_device_tree(FDT_ADDR, ram_size, RAMDISK_ADDR,
-                                    initrd_size, kernel_cmdline);
+        dt_size = sam460ex_load_device_tree(FDT_ADDR, args->ram_size,
+                                    RAMDISK_ADDR, initrd_size,
+                                    args->kernel_cmdline);
         if (dt_size < 0) {
             fprintf(stderr, "couldn't load device tree\n");
             exit(1);

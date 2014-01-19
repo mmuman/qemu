@@ -423,7 +423,8 @@ multiboot.bin linuxboot.bin linuxboot_dma.bin kvmvapic.bin \
 s390-ccw.img \
 spapr-rtas.bin slof.bin \
 palcode-clipper \
-u-boot.e500
+u-boot.e500 \
+u-boot-sam460-20100605-rebuilt.bin u-boot-sam460-20100605.bin sam460ex.dtb
 else
 BLOBS=
 endif

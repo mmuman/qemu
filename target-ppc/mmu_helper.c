@@ -29,10 +29,11 @@
 #include "exec/log.h"
 #include "helper_regs.h"
 
-//#define DEBUG_MMU
+#define DEBUG_MMU
 //#define DEBUG_BATS
 //#define DEBUG_SOFTWARE_TLB
 //#define DUMP_PAGE_TABLES
+#define DEBUG_SOFTWARE_TLB
 //#define FLUSH_ALL_TLBS
 
 #ifdef DEBUG_MMU

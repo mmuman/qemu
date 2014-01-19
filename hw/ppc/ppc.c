@@ -1222,6 +1222,7 @@ struct ppc_dcrn_t {
     dcr_read_cb dcr_read;
     dcr_write_cb dcr_write;
     void *opaque;
+	const char *name;
 };
 
 /* XXX: on 460, DCR addresses are 32 bits wide,
@@ -1274,8 +1275,9 @@ int ppc_dcr_write (ppc_dcr_t *dcr_env, int dcrn, uint32_t val)
     return -1;
 }
 
-int ppc_dcr_register (CPUPPCState *env, int dcrn, void *opaque,
-                      dcr_read_cb dcr_read, dcr_write_cb dcr_write)
+int ppc_dcr_register_int (CPUPPCState *env, int dcrn, const char *name,
+                      void *opaque, dcr_read_cb dcr_read,
+                      dcr_write_cb dcr_write)
 {
     ppc_dcr_t *dcr_env;
     ppc_dcrn_t *dcr;
@@ -1291,6 +1293,7 @@ int ppc_dcr_register (CPUPPCState *env, int dcrn, void *opaque,
         dcr->dcr_write != NULL)
         return -1;
     dcr->opaque = opaque;
+    dcr->name = name;
     dcr->dcr_read = dcr_read;
     dcr->dcr_write = dcr_write;
 
@@ -1308,6 +1311,27 @@ int ppc_dcr_init (CPUPPCState *env, int (*read_error)(int dcrn),
     env->dcr_env = dcr_env;
 
     return 0;
+}
+
+void ppc_dump_dcr (CPUPPCState *env, FILE*f, fprintf_function cpu_fprintf,
+                   int flags)
+{
+    ppc_dcr_t *dcr_env;
+    ppc_dcrn_t *dcr;
+    int dcrn;
+
+    dcr_env = env->dcr_env;
+    if (dcr_env == NULL)
+        return;
+
+    for (dcrn = 0; dcrn < DCRN_NB; dcrn++) {
+        dcr = &dcr_env->dcrn[dcrn];
+        if (dcr->dcr_read == NULL)
+            continue;
+
+        cpu_fprintf(f, "DCR[%s %02x]\t%08x\n", dcr->name, dcrn,
+                    dcr->dcr_read(dcr->opaque, dcrn));
+    }
 }
 
 /*****************************************************************************/

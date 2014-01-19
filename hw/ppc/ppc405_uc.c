@@ -1264,7 +1264,7 @@ static uint32_t ppc4xx_gpt_readb (void *opaque, hwaddr addr)
 static void ppc4xx_gpt_writeb (void *opaque,
                                hwaddr addr, uint32_t value)
 {
-#ifdef DEBUG_I2C
+#ifdef DEBUG_GPT
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
            value);
 #endif
@@ -1283,7 +1283,7 @@ static uint32_t ppc4xx_gpt_readw (void *opaque, hwaddr addr)
 static void ppc4xx_gpt_writew (void *opaque,
                                hwaddr addr, uint32_t value)
 {
-#ifdef DEBUG_I2C
+#ifdef DEBUG_GPT
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
            value);
 #endif
@@ -1403,7 +1403,7 @@ static void ppc4xx_gpt_writel (void *opaque,
     ppc4xx_gpt_t *gpt;
     int idx;
 
-#ifdef DEBUG_I2C
+#ifdef DEBUG_GPT
     printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
            value);
 #endif

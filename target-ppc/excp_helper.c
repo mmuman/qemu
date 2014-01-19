@@ -26,7 +26,7 @@
 
 //#define DEBUG_OP
 //#define DEBUG_SOFTWARE_TLB
-//#define DEBUG_EXCEPTIONS
+#define DEBUG_EXCEPTIONS
 
 #ifdef DEBUG_EXCEPTIONS
 #  define LOG_EXCP(...) qemu_log(__VA_ARGS__)

@@ -57,8 +57,10 @@ typedef uint32_t (*dcr_read_cb)(void *opaque, int dcrn);
 typedef void (*dcr_write_cb)(void *opaque, int dcrn, uint32_t val);
 int ppc_dcr_init (CPUPPCState *env, int (*dcr_read_error)(int dcrn),
                   int (*dcr_write_error)(int dcrn));
-int ppc_dcr_register (CPUPPCState *env, int dcrn, void *opaque,
-                      dcr_read_cb drc_read, dcr_write_cb dcr_write);
+int ppc_dcr_register_int (CPUPPCState *env, int dcrn, const char *name,
+                          void *opaque, dcr_read_cb drc_read,
+                          dcr_write_cb dcr_write);
+#define ppc_dcr_register(e,dcrn,o,r,w) ppc_dcr_register_int(e,dcrn,#dcrn,o,r,w)
 clk_setup_cb ppc_40x_timers_init (CPUPPCState *env, uint32_t freq,
                                   unsigned int decr_excp);
 
