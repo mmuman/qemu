@@ -30,8 +30,8 @@
 #define RAM_SIZE 0x20000000
 
 #define FLASH_BASE 0xe0000000
-#define FLASH_SECTOR_LEN (128 * 1024)
-#define FLASH_SIZE 0x20000000
+#define FLASH_SECTOR_SIZE (128 * 1024)
+#define FLASH_SIZE (4 * 1024 * 1024)
 
 /* Board init.  */
 
@@ -50,7 +50,7 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     int be;
 
     if (!cpu_model)
-        cpu_model = "cfv4e";
+        cpu_model = "any";
     env = cpu_init(cpu_model);
     if (!env) {
         fprintf(stderr, "Unable to find m68k CPU definition\n");
@@ -73,11 +73,17 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
         exit(1);
     }
 
+#ifdef TARGET_WORDS_BIGENDIAN
+    be = 1;
+#else
     be = 0;
-    if (!pflash_cfi01_register(FLASH_BASE, NULL, "firebee.rom", FLASH_SIZE,
-                               dinfo ? dinfo->bdrv : NULL,
-                               FLASH_SECTOR_LEN, FLASH_SIZE / FLASH_SECTOR_LEN,
-                               2, 0, 0, 0, 0, be)) {
+#endif
+
+    if (!pflash_cfi02_register(FLASH_BASE, NULL, "firebee.flash", FLASH_SIZE,
+                               dinfo ? dinfo->bdrv : NULL, FLASH_SECTOR_SIZE,
+                               FLASH_SIZE / FLASH_SECTOR_SIZE, 1,
+                               2, 0x00BF, 0x236D, 0x0000, 0x0000,
+                               0x5555, 0x2AAA, be)) {
         fprintf(stderr, "qemu: Error registering flash memory.\n");
         exit(1);
     }
