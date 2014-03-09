@@ -33,6 +33,25 @@
 #define FLASH_SECTOR_SIZE (128 * 1024)
 #define FLASH_SIZE (4 * 1024 * 1024)
 
+static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
+                                      unsigned size)
+{
+    fprintf(stderr, "Unmapped read @%lx(%d)\n", addr, size);
+    return 0;
+}
+static void firebee_unmapped_write(void *opaque, hwaddr addr,
+                                   uint64_t value, unsigned size)
+{
+    fprintf(stderr, "Unmapped write @%lx(%d) %lx\n", addr, size, value);
+}
+
+static const MemoryRegionOps firebee_unmapped_ops = {
+    .read = firebee_unmapped_read,
+    .write = firebee_unmapped_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+};
+
+
 /* Board init.  */
 
 static void firebee_m68k_init(QEMUMachineInitArgs *args)
@@ -42,7 +61,11 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     const char *kernel_filename = args->kernel_filename;
     CPUM68KState *env;
     MemoryRegion *address_space_mem =  get_system_memory();
+    MemoryRegion *unmapped = g_new(MemoryRegion, 1);
     MemoryRegion *ram = g_new(MemoryRegion, 1);
+    MemoryRegion *ocram0 = g_new(MemoryRegion, 1);
+    MemoryRegion *ocram1 = g_new(MemoryRegion, 1);
+    MemoryRegion *sram = g_new(MemoryRegion, 1);
     int kernel_size;
     uint64_t elf_entry;
     hwaddr entry;
@@ -60,10 +83,29 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     /* Initialize CPU registers.  */
     env->vbr = 0;
 
-    /* RAM at address zero */
+    /* Unmapped */
+    memory_region_init_io(unmapped, NULL, &firebee_unmapped_ops, NULL,
+                          "firebee_unmapped.io", (1L << 32));
+    memory_region_add_subregion(address_space_mem, 0, unmapped);
+
+    /* SDRAM at address zero */
     memory_region_init_ram(ram, NULL, "firebee_sdram.ram", ram_size);
     vmstate_register_ram_global(ram);
     memory_region_add_subregion(address_space_mem, 0, ram);
+
+    /* On-Chip RAM.  */
+    memory_region_init_ram(ocram0, NULL, "firebee_ram0.ram", 0x1000);
+    vmstate_register_ram_global(ocram0);
+    memory_region_add_subregion(address_space_mem, 0xff100000, ocram0);
+    
+    memory_region_init_ram(ocram1, NULL, "firebee_ram1.ram", 0x1000);
+    vmstate_register_ram_global(ocram1);
+    memory_region_add_subregion(address_space_mem, 0xff101000, ocram1);
+
+    /* 32Kb SRAM.  */
+    memory_region_init_ram(sram, NULL, "firebee_sram.ram", 0x8000);
+    vmstate_register_ram_global(sram);
+    memory_region_add_subregion(address_space_mem, 0xff010000, sram);
 
     /* Flash */
     dinfo = drive_get(IF_PFLASH, 0, 0);

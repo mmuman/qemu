@@ -172,9 +172,22 @@ void HELPER(cf_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
     case M68K_CR_ACR2:
     case M68K_CR_ACR3:
         /* TODO: Implement Access Control Registers.  */
+        env->acr[reg - 0x04] = val;
+        break;
+    case 0x08: /* MMUBAR */
+        env->mmubar = val;
         break;
     case M68K_CR_VBR:
         env->vbr = val;
+        break;
+    case 0xc04: /* RAMBAR0 */
+        env->rambar0 = val;
+        break;
+    case 0xc05: /* RAMBAR1 */
+        env->rambar1 = val;
+        break;        
+    case 0xc0f: /* MBAR */
+        env->mbar = val;
         break;
     /* TODO: Implement control registers.  */
     default:
