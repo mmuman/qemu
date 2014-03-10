@@ -22,6 +22,8 @@
 #include "hw/loader.h"
 #include "hw/block/flash.h"
 #include "hw/devices.h"
+#include "qemu/timer.h"
+#include "hw/ptimer.h"
 #include "sysemu/sysemu.h"
 #include "elf.h"
 #include "exec/address-spaces.h"
@@ -35,12 +37,59 @@
 #define FLASH_SECTOR_SIZE (128 * 1024)
 #define FLASH_SIZE (8 * 1024 * 1024)
 
+/* Slice Timers (SLT) */
+
+typedef struct {
+    MemoryRegion iomem;
+    qemu_irq irq;
+    ptimer_state *timer;
+    uint32_t tcnt;
+    uint32_t cr;
+    uint32_t cnt;
+    uint32_t sr;
+} mcf_slt_state;
+
+static void mcf_slt_write(void *opaque, hwaddr offset,
+                          uint64_t value, unsigned size)
+{
+}
+static void mcf_slt_trigger(void *opaque)
+{
+}
+
+static uint64_t mcf_slt_read(void *opaque, hwaddr addr,
+                             unsigned size)
+{
+    return 0;
+}
+
+static const MemoryRegionOps mcf_slt_ops = {
+    .read = mcf_slt_read,
+    .write = mcf_slt_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+};
+
+static void mcf_slt_mm_init(MemoryRegion *address_space, hwaddr base,
+                            qemu_irq irq)
+{
+    MemoryRegion *iomem = g_new(MemoryRegion, 1);
+    mcf_slt_state *s;
+    QEMUBH *bh;
+
+    memory_region_init_io(iomem, NULL, &mcf_slt_ops, NULL, "mcf_slt", 0x10);
+    memory_region_add_subregion(address_space, base, iomem);
+    s = (mcf_slt_state *)g_malloc0(sizeof(mcf_slt_state));
+    bh = qemu_bh_new(mcf_slt_trigger, s);
+    s->timer = ptimer_init(bh);
+    s->irq = irq;
+}
+
+/* Unmapped I/O */
+
 static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
                                       unsigned size)
 {
-    if (addr != 0xff000908) {
-        fprintf(stderr, "Unmapped read @%lx(%d)\n", addr, size);
-    }
+    fprintf(stderr, "Unmapped read @%lx(%d)\n", addr, size);
     return 0;
 }
 static void firebee_unmapped_write(void *opaque, hwaddr addr,
@@ -122,6 +171,9 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     mcf_psc_mm_init(address_space_mem, 0xff008700, pic[34], serial_hds[1]);
     mcf_psc_mm_init(address_space_mem, 0xff008800, pic[33], serial_hds[2]);
     mcf_psc_mm_init(address_space_mem, 0xff008900, pic[32], serial_hds[3]);
+
+    mcf_slt_mm_init(address_space_mem, 0xff000900, pic[54]);
+    mcf_slt_mm_init(address_space_mem, 0xff000910, pic[53]);
 
     /* Flash */
     dinfo = drive_get(IF_PFLASH, 0, 0);
