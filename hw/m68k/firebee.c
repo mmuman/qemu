@@ -17,10 +17,12 @@
  */
 
 #include "hw/hw.h"
+#include "hw/m68k/mcf.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "hw/block/flash.h"
 #include "hw/devices.h"
+#include "sysemu/sysemu.h"
 #include "elf.h"
 #include "exec/address-spaces.h"
 #include "sysemu/qtest.h"
@@ -31,12 +33,14 @@
 
 #define FLASH_BASE 0xe0000000
 #define FLASH_SECTOR_SIZE (128 * 1024)
-#define FLASH_SIZE (4 * 1024 * 1024)
+#define FLASH_SIZE (8 * 1024 * 1024)
 
 static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
                                       unsigned size)
 {
-    fprintf(stderr, "Unmapped read @%lx(%d)\n", addr, size);
+    if (addr != 0xff000908) {
+        fprintf(stderr, "Unmapped read @%lx(%d)\n", addr, size);
+    }
     return 0;
 }
 static void firebee_unmapped_write(void *opaque, hwaddr addr,
@@ -59,6 +63,7 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     ram_addr_t ram_size = RAM_SIZE;
     const char *cpu_model = args->cpu_model;
     const char *kernel_filename = args->kernel_filename;
+    M68kCPU *cpu;
     CPUM68KState *env;
     MemoryRegion *address_space_mem =  get_system_memory();
     MemoryRegion *unmapped = g_new(MemoryRegion, 1);
@@ -71,14 +76,17 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     hwaddr entry;
     DriveInfo *dinfo;
     int be;
+    qemu_irq *pic;
 
-    if (!cpu_model)
+    if (!cpu_model) {
         cpu_model = "any";
-    env = cpu_init(cpu_model);
-    if (!env) {
+    }
+    cpu = cpu_m68k_init(cpu_model);
+    if (!cpu) {
         fprintf(stderr, "Unable to find m68k CPU definition\n");
         exit(1);
     }
+    env = &cpu->env;
 
     /* Initialize CPU registers.  */
     env->vbr = 0;
@@ -106,6 +114,14 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     memory_region_init_ram(sram, NULL, "firebee_sram.ram", 0x8000);
     vmstate_register_ram_global(sram);
     memory_region_add_subregion(address_space_mem, 0xff010000, sram);
+
+    /* Internal peripherals.  */
+    pic = mcf_intc_init(address_space_mem, 0xff000700, cpu);
+
+    mcf_psc_mm_init(address_space_mem, 0xff008600, pic[35], serial_hds[0]);
+    mcf_psc_mm_init(address_space_mem, 0xff008700, pic[34], serial_hds[1]);
+    mcf_psc_mm_init(address_space_mem, 0xff008800, pic[33], serial_hds[2]);
+    mcf_psc_mm_init(address_space_mem, 0xff008900, pic[32], serial_hds[3]);
 
     /* Flash */
     dinfo = drive_get(IF_PFLASH, 0, 0);
