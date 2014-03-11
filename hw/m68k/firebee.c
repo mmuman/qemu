@@ -166,17 +166,45 @@ static void mcf_slt_mm_init(MemoryRegion *address_space, hwaddr base,
 }
 
 /* Unmapped I/O */
+static hwaddr unm_last = 0;
+static int unm_count = 0;
+static int fpga_done = 0;
 
 static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
                                       unsigned size)
 {
-    fprintf(stderr, "Unmapped read @%lx(%d)\n", addr, size);
+    if (addr == 0xff000a27) {
+        return (1 << 0) | (fpga_done << 5); 
+    }
+    if (unm_last != addr) {
+        if (unm_count > 0) {
+            fprintf(stderr, "\tx%d times\n", unm_count+1);    
+        }
+        fprintf(stderr, "Unmapped read @%lx(%d)\n", addr, size);
+        unm_count = 0;
+        unm_last = addr;
+    } else {
+        unm_count++;
+        if (unm_count >= 500) {
+            fprintf(stderr, "\tEndless loop detected, aborting.\n");
+            exit(-1);   
+        }
+    }
+    
     return 0;
 }
 static void firebee_unmapped_write(void *opaque, hwaddr addr,
                                    uint64_t value, unsigned size)
 {
+    if (addr == 0xff000a07) {
+        if (value & (1 << 1)) {
+            fpga_done = 1;
+        }
+        return;
+    }
     fprintf(stderr, "Unmapped write @%lx(%d) %lx\n", addr, size, value);
+    unm_last = addr;
+    unm_count = 0;
 }
 
 static const MemoryRegionOps firebee_unmapped_ops = {
@@ -201,6 +229,9 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     MemoryRegion *ocram0 = g_new(MemoryRegion, 1);
     MemoryRegion *ocram1 = g_new(MemoryRegion, 1);
     MemoryRegion *sram = g_new(MemoryRegion, 1);
+
+    /* MemoryRegion *wtf = g_new(MemoryRegion, 1); */
+
     int kernel_size;
     uint64_t elf_entry;
     hwaddr entry;
@@ -244,6 +275,11 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     memory_region_init_ram(sram, NULL, "firebee_sram.ram", 0x8000);
     vmstate_register_ram_global(sram);
     memory_region_add_subregion(address_space_mem, 0xff010000, sram);
+
+    /* ??? */
+    /* memory_region_init_ram(wtf, NULL, "wtf.ram", 0x10000);
+    vmstate_register_ram_global(wtf);
+    memory_region_add_subregion(address_space_mem, 0x20000000, wtf); */
 
     /* Internal peripherals.  */
     pic = mcf_intc_init(address_space_mem, 0xff000700, cpu);
