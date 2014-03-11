@@ -29,6 +29,8 @@
 #include "exec/address-spaces.h"
 #include "sysemu/qtest.h"
 
+#define SYS_FREQ 33000000
+
 #define KERNEL_LOAD_ADDR 0x10000
 
 #define RAM_SIZE 0x20000000
@@ -39,28 +41,98 @@
 
 /* Slice Timers (SLT) */
 
+#define MCF_SLT_RUN (1 << 26)
+#define MCF_SLT_IEN (1 << 25)
+#define MCF_SLT_TEN (1 << 24)
+
+#define MCF_SLT_BE (1 << 25)
+#define MCF_SLT_ST (1 << 24)
+
 typedef struct {
     MemoryRegion iomem;
     qemu_irq irq;
     ptimer_state *timer;
     uint32_t tcnt;
     uint32_t cr;
-    uint32_t cnt;
     uint32_t sr;
 } mcf_slt_state;
 
-static void mcf_slt_write(void *opaque, hwaddr offset,
+static void mcf_slt_reset(mcf_slt_state *s)
+{
+    s->tcnt = 0;
+    s->cr = 0;
+    s->sr = 0;
+}
+
+static void mcf_slt_update(mcf_slt_state *s)
+{
+    if ((s->cr & MCF_SLT_IEN) && (s->sr & MCF_SLT_ST))
+        qemu_irq_raise(s->irq);
+    else
+        qemu_irq_lower(s->irq);
+}
+
+static void mcf_slt_write(void *opaque, hwaddr addr,
                           uint64_t value, unsigned size)
 {
-}
-static void mcf_slt_trigger(void *opaque)
-{
+    mcf_slt_state *s = (mcf_slt_state *)opaque;
+    switch (addr & 0xf) {
+    case 0x0:
+        s->tcnt = value;
+        s->sr &= ~MCF_SLT_ST;
+        mcf_slt_update(s);
+        ptimer_stop(s->timer);
+        ptimer_set_limit(s->timer, s->tcnt, 1);
+        if (s->cr & MCF_SLT_TEN) {
+            ptimer_run(s->timer, !(s->cr & MCF_SLT_RUN));
+        }
+        break;
+    case 0x4:
+        s->cr &= ~(MCF_SLT_RUN | MCF_SLT_IEN | MCF_SLT_TEN);
+        value &= (MCF_SLT_RUN | MCF_SLT_IEN | MCF_SLT_TEN);
+        s->cr |= value;
+        
+        ptimer_stop(s->timer);
+        if (s->cr & MCF_SLT_TEN) {
+            ptimer_run(s->timer, !(s->cr & MCF_SLT_RUN));   
+        } else {
+            ptimer_set_limit(s->timer, s->tcnt, 1);
+        }
+        mcf_slt_update(s);
+        break;
+    case 0x8:
+        break;
+    case 0xc:
+        if (value & MCF_SLT_BE) {
+            s->sr &= ~MCF_SLT_BE;
+        }
+        if (value & MCF_SLT_ST) {
+            s->sr &= ~MCF_SLT_ST;
+            mcf_slt_update(s);
+        }
+        break;
+    default:
+        hw_error("mcf_slt_write: Bad offset 0x%x\n", (int)addr);
+    }
 }
 
 static uint64_t mcf_slt_read(void *opaque, hwaddr addr,
                              unsigned size)
 {
-    return 0;
+    mcf_slt_state *s = (mcf_slt_state *)opaque;
+    switch (addr & 0xf) {
+    case 0x0:
+        return s->tcnt;
+    case 0x4:
+        return s->cr;
+    case 0x8:
+        return ptimer_get_count(s->timer);
+    case 0xc:
+        return s->sr;
+    default:
+        hw_error("mcf_slt_read: Bad offset 0x%x\n", (int)addr);
+        return 0;
+    }
 }
 
 static const MemoryRegionOps mcf_slt_ops = {
@@ -69,19 +141,28 @@ static const MemoryRegionOps mcf_slt_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
+static void mcf_slt_trigger(void *opaque)
+{
+    mcf_slt_state *s = (mcf_slt_state *)opaque;
+    s->sr |= MCF_SLT_ST;
+    mcf_slt_update(s);
+}
+
+
 static void mcf_slt_mm_init(MemoryRegion *address_space, hwaddr base,
                             qemu_irq irq)
 {
-    MemoryRegion *iomem = g_new(MemoryRegion, 1);
     mcf_slt_state *s;
     QEMUBH *bh;
 
-    memory_region_init_io(iomem, NULL, &mcf_slt_ops, NULL, "mcf_slt", 0x10);
-    memory_region_add_subregion(address_space, base, iomem);
     s = (mcf_slt_state *)g_malloc0(sizeof(mcf_slt_state));
+    memory_region_init_io(&s->iomem, NULL, &mcf_slt_ops, s, "mcf_slt", 0x10);
+    memory_region_add_subregion(address_space, base, &s->iomem);
     bh = qemu_bh_new(mcf_slt_trigger, s);
     s->timer = ptimer_init(bh);
+    ptimer_set_freq(s->timer, SYS_FREQ);
     s->irq = irq;
+    mcf_slt_reset(s);
 }
 
 /* Unmapped I/O */
