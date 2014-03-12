@@ -169,6 +169,7 @@ static void mcf_slt_mm_init(MemoryRegion *address_space, hwaddr base,
 static hwaddr unm_last = 0;
 static int unm_count = 0;
 static int fpga_done = 0;
+static uint64_t unm_value = 0;
 
 static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
                                       unsigned size)
@@ -191,8 +192,13 @@ static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
         }
     }
     
-    return 0;
+    if (addr == 0xff000b60) {
+        return 0x12345678;
+    }
+
+    return unm_value;
 }
+
 static void firebee_unmapped_write(void *opaque, hwaddr addr,
                                    uint64_t value, unsigned size)
 {
@@ -216,6 +222,7 @@ static const MemoryRegionOps firebee_unmapped_ops = {
 
 /* Board init.  */
 
+
 static void firebee_m68k_init(QEMUMachineInitArgs *args)
 {
     ram_addr_t ram_size = RAM_SIZE;
@@ -229,8 +236,10 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     MemoryRegion *ocram0 = g_new(MemoryRegion, 1);
     MemoryRegion *ocram1 = g_new(MemoryRegion, 1);
     MemoryRegion *sram = g_new(MemoryRegion, 1);
-
-    /* MemoryRegion *wtf = g_new(MemoryRegion, 1); */
+    MemoryRegion *ocram0a = g_new(MemoryRegion, 1);
+    MemoryRegion *ocram1a = g_new(MemoryRegion, 1);
+    MemoryRegion *ocram0b = g_new(MemoryRegion, 1);
+    MemoryRegion *ocram1b = g_new(MemoryRegion, 1);
 
     int kernel_size;
     uint64_t elf_entry;
@@ -265,21 +274,26 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     /* On-Chip RAM.  */
     memory_region_init_ram(ocram0, NULL, "firebee_ram0.ram", 0x1000);
     vmstate_register_ram_global(ocram0);
-    memory_region_add_subregion(address_space_mem, 0xff100000, ocram0);
-    
+
+    memory_region_init_alias(ocram0a, NULL, "firebee_ram0a.ram", ocram0, 0x0, 0x1000);
+    memory_region_add_subregion(address_space_mem, 0xff100000, ocram0a);
+    /* Remapped by FireTOS */
+    memory_region_init_alias(ocram0b, NULL, "firebee_ram0b.ram", ocram0, 0x0, 0x1000);
+    memory_region_add_subregion(address_space_mem, 0x20000000, ocram0b);
+
     memory_region_init_ram(ocram1, NULL, "firebee_ram1.ram", 0x1000);
     vmstate_register_ram_global(ocram1);
-    memory_region_add_subregion(address_space_mem, 0xff101000, ocram1);
+
+    memory_region_init_alias(ocram1a, NULL, "firebee_ram1a.ram", ocram1, 0x0, 0x1000);
+    memory_region_add_subregion(address_space_mem, 0xff101000, ocram1a);
+    /* Remapped by FireTOS */
+    memory_region_init_alias(ocram1b, NULL, "firebee_ram1b.ram", ocram1, 0x0, 0x1000);
+    memory_region_add_subregion(address_space_mem, 0x20001000, ocram1b);
 
     /* 32Kb SRAM.  */
     memory_region_init_ram(sram, NULL, "firebee_sram.ram", 0x8000);
     vmstate_register_ram_global(sram);
     memory_region_add_subregion(address_space_mem, 0xff010000, sram);
-
-    /* ??? */
-    /* memory_region_init_ram(wtf, NULL, "wtf.ram", 0x10000);
-    vmstate_register_ram_global(wtf);
-    memory_region_add_subregion(address_space_mem, 0x20000000, wtf); */
 
     /* Internal peripherals.  */
     pic = mcf_intc_init(address_space_mem, 0xff000700, cpu);

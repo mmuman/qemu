@@ -162,6 +162,7 @@ void m68k_cpu_init_gdb(M68kCPU *cpu)
 
 void HELPER(cf_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
 {
+    fprintf(stderr, "MOVEC 0x%x 0x%x\n", reg, val);
     switch (reg) {
     case M68K_CR_CACR:
         env->cacr = val;
