@@ -174,9 +174,6 @@ static uint64_t unm_value = 0;
 static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
                                       unsigned size)
 {
-    if (addr == 0xff000a27) {
-        return (1 << 0) | (fpga_done << 5); 
-    }
     if (unm_last != addr) {
         if (unm_count > 0) {
             fprintf(stderr, "\tx%d times\n", unm_count+1);    
@@ -191,9 +188,20 @@ static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
             exit(-1);   
         }
     }
-    
-    if (addr == 0xff000b60) {
+    /* Unlocks fpga_init() (uses GPIO) */
+    if (addr == 0xff000a27) {
+        return (1 << 0) | (fpga_done << 5); 
+    }    
+    /*if (addr == 0xff000b60) {
         return 0x12345678;
+    }*/
+
+    /* Unlocks dvi_on() (I2C) */
+    if (addr == 0xff008f0c) {
+        return (1 << 1) | (1 << 5); // I2C interrupt
+    }
+    if (addr == 0xff008f10) {
+        return 0x4c; // I2C data
     }
 
     return unm_value;
@@ -202,6 +210,7 @@ static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
 static void firebee_unmapped_write(void *opaque, hwaddr addr,
                                    uint64_t value, unsigned size)
 {
+    /* Unlocks fpga_init() (uses GPIO) */
     if (addr == 0xff000a07) {
         if (value & (1 << 1)) {
             fpga_done = 1;
@@ -209,7 +218,7 @@ static void firebee_unmapped_write(void *opaque, hwaddr addr,
         return;
     }
     fprintf(stderr, "Unmapped write @%lx(%d) %lx\n", addr, size, value);
-    unm_last = addr;
+    unm_last = 0;
     unm_count = 0;
 }
 
