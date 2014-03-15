@@ -29,6 +29,16 @@
 #include "exec/address-spaces.h"
 #include "sysemu/qtest.h"
 
+
+#define DEBUG_FB
+#ifdef DEBUG_FB
+#define FB_DPRINTF(fmt, ...) \
+do { fprintf(stderr, "Firebee: " fmt , ## __VA_ARGS__); } while (0)
+#else
+#define FB_DPRINTF(fmt, ...) \
+do { } while (0)
+#endif
+
 #define SYS_FREQ 33000000
 
 #define KERNEL_LOAD_ADDR 0x10000
@@ -176,34 +186,69 @@ static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
 {
     if (unm_last != addr) {
         if (unm_count > 0) {
-            fprintf(stderr, "\tx%d times\n", unm_count+1);    
+            FB_DPRINTF("\tx%d times\n", unm_count+1);    
         }
-        fprintf(stderr, "Unmapped read @%lx(%d)\n", addr, size);
         unm_count = 0;
         unm_last = addr;
     } else {
         unm_count++;
         if (unm_count >= 500) {
-            fprintf(stderr, "\tEndless loop detected, aborting.\n");
+            FB_DPRINTF("\tEndless loop detected, aborting.\n");
             exit(-1);   
         }
     }
     /* Unlocks fpga_init() (uses GPIO) */
     if (addr == 0xff000a27) {
         return (1 << 0) | (fpga_done << 5); 
-    }    
-    /*if (addr == 0xff000b60) {
-        return 0x12345678;
-    }*/
-
-    /* Unlocks dvi_on() (I2C) */
-    if (addr == 0xff008f0c) {
-        return (1 << 1) | (1 << 5); // I2C interrupt
     }
-    if (addr == 0xff008f10) {
-        return 0x4c; // I2C data
+    /* I2C */
+    if ( (addr & ~0x3f) == 0xff008f00) {
+        if (!unm_count) {
+            FB_DPRINTF("I2C read @%lx(%d)\n", addr & 0x3f, size);
+        }
+        /* Unlocks dvi_on() (I2C) */
+        if ( (addr & 0x3f) == 0x0c) {
+            return (1 << 1) | (1 << 5); // I2C interrupt
+        }
+        if ( (addr & 0x3f) == 0x10) {
+            return 0x4c; // I2C data
+        }
+        return 0;
+    }
+    /* DSPI */
+    if ( (addr & ~0xff) == 0xff008a00) {
+        if (!unm_count) {
+            FB_DPRINTF("DSPI read @%lx(%d)\n", addr & 0xff, size);
+        }
+        if ( (addr & 0xff) == 0x2c) {
+            return (1 << 31); // TCF - Transfer Complete Flag
+        }
+        return 0;
+    }
+    /* FEC */
+    if ( (addr & ~0x3ff) == 0xff009000) {
+        if (!unm_count) {
+            FB_DPRINTF("FEC0 read @%lx(%d)\n", addr & 0x3ff, size);
+        }
+        if ( (addr & 0x3ff) == 0x004) {   
+            return (1 << 28); // GRA - Graceful Stop
+            // return -1;
+        }
+        return 0;
+    }
+    if ( (addr & ~0x3ff) == 0xff009800) {
+        if (!unm_count) {
+            FB_DPRINTF("FEC1 read @%lx(%d)\n", addr & 0x3ff, size);
+        }
+        if ( (addr & 0x3ff) == 0x004) {
+            return (1 << 28); // GRA - Graceful Stop
+        }
+        return 0;
     }
 
+    if (!unm_count) {
+        FB_DPRINTF("Unmapped read @%lx(%d)\n", addr, size);
+    }
     return unm_value;
 }
 
@@ -217,7 +262,27 @@ static void firebee_unmapped_write(void *opaque, hwaddr addr,
         }
         return;
     }
-    fprintf(stderr, "Unmapped write @%lx(%d) %lx\n", addr, size, value);
+    /* I2C */
+    if ( (addr & ~0x3f) == 0xff008f00) {        
+        FB_DPRINTF("I2C write @%lx(%d) %lx\n", addr & 0x3f, size, value);
+        return;
+    }
+    /* DSPI */
+    if ( (addr & ~0xff) == 0xff008a00) {        
+        FB_DPRINTF("DSPI write @%lx(%d) %lx\n", addr & 0xff, size, value);
+        return;
+    }    
+    /* FEC */
+    if ( (addr & ~0x3ff) == 0xff009000) {
+        FB_DPRINTF("FEC0 write @%lx(%d) %lx\n", addr & 0x3ff, size, value);
+        return;
+    }
+   if ( (addr & ~0x3ff) == 0xff009800) {
+        FB_DPRINTF("FEC1 write @%lx(%d) %lx\n", addr & 0x3ff, size, value);
+        return;
+    }
+
+    FB_DPRINTF("Unmapped write @%lx(%d) %lx\n", addr, size, value);
     unm_last = 0;
     unm_count = 0;
 }
