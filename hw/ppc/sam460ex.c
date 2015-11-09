@@ -22,6 +22,7 @@
 #include "kvm_ppc.h"
 #include "hw/devices.h"
 #include "sysemu/device_tree.h"
+#include "sysemu/block-backend.h"
 #include "hw/loader.h"
 #include "elf.h"
 #include "exec/address-spaces.h"
@@ -83,7 +84,6 @@
 #define PPC440EP_PCI_SPECIAL  0xeed00000
 #define PPC440EP_PCI_REGS     0xef400000
 #define PPC440EP_PCI_IO       0xe8000000
-#define PPC440EP_PCI_IOLEN    0x00010000
 
 #define PPC440EP_SDRAM_NR_BANKS 4
 
@@ -332,13 +332,17 @@ static void ppc4xx_l2sram_init(CPUPPCState *env)
 
     l2sram = g_malloc0(sizeof(ppc4xx_l2sram_t));
     /* XXX: Size is 4*64kB for 460ex, cf. U-Boot, ppc4xx-isram.h */
-    memory_region_init_ram(&l2sram->bank[0], "ppc4xx.l2sram_bank0", 64 * 1024);
+    memory_region_init_ram(&l2sram->bank[0], NULL, "ppc4xx.l2sram_bank0",
+                           64 * 1024, &error_abort);
     vmstate_register_ram_global(&l2sram->bank[0]);
-    memory_region_init_ram(&l2sram->bank[1], "ppc4xx.l2sram_bank1", 64 * 1024);
+    memory_region_init_ram(&l2sram->bank[1], NULL, "ppc4xx.l2sram_bank1",
+                           64 * 1024, &error_abort);
     vmstate_register_ram_global(&l2sram->bank[1]);
-    memory_region_init_ram(&l2sram->bank[2], "ppc4xx.l2sram_bank2", 64 * 1024);
+    memory_region_init_ram(&l2sram->bank[2], NULL, "ppc4xx.l2sram_bank2",
+                           64 * 1024, &error_abort);
     vmstate_register_ram_global(&l2sram->bank[2]);
-    memory_region_init_ram(&l2sram->bank[3], "ppc4xx.l2sram_bank3", 64 * 1024);
+    memory_region_init_ram(&l2sram->bank[3], NULL, "ppc4xx.l2sram_bank3",
+                           64 * 1024, &error_abort);
     vmstate_register_ram_global(&l2sram->bank[3]);
     qemu_register_reset(&l2sram_reset, l2sram);
     ppc_dcr_register(env, DCR_L2CACHE_CFG,
@@ -522,7 +526,7 @@ static void ppc4xx_ocm_init(CPUPPCState *env)
 
     ocm = g_malloc0(sizeof(ppc4xx_ocm_t));
     /* XXX: Size is 4096 or 0x04000000 */
-    memory_region_init_ram(&ocm->isarc_ram, "ppc4xx.ocm", 4096);
+    memory_region_init_ram(&ocm->isarc_ram, "ppc4xx.ocm", 4096, &error_abort);
     vmstate_register_ram_global(&ocm->isarc_ram);
     memory_region_init_alias(&ocm->dsarc_ram, "ppc4xx.dsarc", &ocm->isarc_ram,
                              0, 4096);
@@ -1257,7 +1261,7 @@ static void ppc4xx_i2c_init(hwaddr base, qemu_irq irq)
 #ifdef DEBUG_I2C
     printf("%s: offset " TARGET_FMT_plx "\n", __func__, base);
 #endif
-    memory_region_init_io(&i2c->iomem, &i2c_ops, i2c, "i2c", 0x011);
+    memory_region_init_io(&i2c->iomem, NULL, &i2c_ops, i2c, "i2c", 0x011);
     memory_region_add_subregion(get_system_memory(), base, &i2c->iomem);
     qemu_register_reset(ppc4xx_i2c_reset, i2c);
 }
@@ -1267,24 +1271,27 @@ static void ppc4xx_i2c_init(hwaddr base, qemu_irq irq)
 static int sam460ex_load_uboot(void)
 {
     DriveInfo *dinfo;
-    BlockDriverState *dstate = NULL;
+    BlockBackend *blk = NULL;
     hwaddr base = FLASH_BASE | ((hwaddr)FLASH_BASE_H << 32);
+    long bios_size = FLASH_SIZE;
+    int fl_sectors;
 
     dinfo = drive_get(IF_PFLASH, 0, 0);
     if (dinfo) {
-        dstate = dinfo->bdrv;
+        blk = blk_by_legacy_dinfo(dinfo);
+        bios_size = blk_getlength(blk);
     }
+    fl_sectors = (bios_size + 65535) >> 16;
 
-    if (!pflash_cfi01_register(base, NULL, "sam460ex.flash", FLASH_SIZE,
-                               dstate, (64 * 1024),
-                               FLASH_SIZE >> 16,
+    if (!pflash_cfi01_register(base, NULL, "sam460ex.flash", bios_size,
+                               blk, (64 * 1024), fl_sectors,
                                1, 0x89, 0x18, 0x0000, 0x0, 1)) {
         fprintf(stderr, "qemu: Error registering flash memory.\n");
-        /* XXX: return an eror instead? */
+        /* XXX: return an error instead? */
         exit(1);
     }
 
-    if (!dstate) {
+    if (!blk) {
         /*fprintf(stderr, "No flash image given with the 'pflash' parameter,"
                 " using default u-boot image\n");*/
         base = UBOOT_LOAD_BASE | ((hwaddr)FLASH_BASE_H << 32);
@@ -1320,25 +1327,25 @@ static int sam460ex_load_device_tree(hwaddr addr,
 
     /* Manipulate device tree in memory. */
 
-    ret = qemu_devtree_setprop(fdt, "/memory", "reg", mem_reg_property,
+    ret = qemu_fdt_setprop(fdt, "/memory", "reg", mem_reg_property,
                                sizeof(mem_reg_property));
     if (ret < 0)
         fprintf(stderr, "couldn't set /memory/reg\n");
 
     /* default FDT doesn't have a /chosen node... */
-    qemu_devtree_add_subnode(fdt, "/chosen");
+    qemu_fdt_add_subnode(fdt, "/chosen");
 
-    ret = qemu_devtree_setprop_cell(fdt, "/chosen", "linux,initrd-start",
+    ret = qemu_fdt_setprop_cell(fdt, "/chosen", "linux,initrd-start",
                                     initrd_base);
     if (ret < 0)
         fprintf(stderr, "couldn't set /chosen/linux,initrd-start\n");
 
-    ret = qemu_devtree_setprop_cell(fdt, "/chosen", "linux,initrd-end",
+    ret = qemu_fdt_setprop_cell(fdt, "/chosen", "linux,initrd-end",
                                     (initrd_base + initrd_size));
     if (ret < 0)
         fprintf(stderr, "couldn't set /chosen/linux,initrd-end\n");
 
-    ret = qemu_devtree_setprop_string(fdt, "/chosen", "bootargs",
+    ret = qemu_fdt_setprop_string(fdt, "/chosen", "bootargs",
                                       kernel_cmdline);
     if (ret < 0)
         fprintf(stderr, "couldn't set /chosen/bootargs\n");
@@ -1351,15 +1358,12 @@ static int sam460ex_load_device_tree(hwaddr addr,
         clock_freq = kvmppc_get_clockfreq();
     }
 
-    qemu_devtree_setprop_cell(fdt, "/cpus/cpu@0", "clock-frequency",
+    qemu_fdt_setprop_cell(fdt, "/cpus/cpu@0", "clock-frequency",
                               clock_freq);
-    qemu_devtree_setprop_cell(fdt, "/cpus/cpu@0", "timebase-frequency",
+    qemu_fdt_setprop_cell(fdt, "/cpus/cpu@0", "timebase-frequency",
                               tb_freq);
 
-    ret = rom_add_blob_fixed(BINARY_DEVICE_TREE_FILE, fdt, fdt_size, addr);
-    if (ret < 0) {
-        goto out;
-    }
+    rom_add_blob_fixed(BINARY_DEVICE_TREE_FILE, fdt, fdt_size, addr);
     g_free(fdt);
     ret = fdt_size;
 
@@ -1421,7 +1425,7 @@ static void mmubooke_create_initial_mapping(CPUPPCState *env,
     tlb->RPN = (0xef000000 & TARGET_PAGE_MASK) | 0x4;
     tlb->PID = 0;
 
-	/* HACK: just for testing */
+    /* HACK: just for testing */
     tlb = &env->tlb.tlbe[i++];
     tlb->attr = 0;
     tlb->prot = PAGE_VALID | ((PAGE_READ | PAGE_WRITE) << 4);
@@ -1459,19 +1463,18 @@ static void main_cpu_reset(void *opaque)
     }
 }
 
-static void sam460ex_init(QEMUMachineInitArgs *args)
+static void sam460ex_init(MachineState *machine)
 {
     unsigned int pci_irq_nrs[4] = { 28, 27, 26, 25 };
     MemoryRegion *address_space_mem = get_system_memory();
-    MemoryRegion *ram_memories
-        = g_malloc(PPC440EP_SDRAM_NR_BANKS * sizeof(*ram_memories));
+    MemoryRegion *ram_memories = g_new(MemoryRegion, PPC440EP_SDRAM_NR_BANKS);
     hwaddr ram_bases[PPC440EP_SDRAM_NR_BANKS];
     hwaddr ram_sizes[PPC440EP_SDRAM_NR_BANKS];
     MemoryRegion *l2cache_ram = g_new(MemoryRegion, 1);
     MemoryRegion *ocm_ram = g_new(MemoryRegion, 1);
     qemu_irq *pic;
     qemu_irq *irqs;
-    PCIBus *pcibus;
+    PCIBus *pci_bus;
     PowerPCCPU *cpu;
     CPUPPCState *env;
     uint64_t elf_entry;
@@ -1480,15 +1483,16 @@ static void sam460ex_init(QEMUMachineInitArgs *args)
     hwaddr loadaddr = 0;
     target_long initrd_size = 0;
     DeviceState *dev;
+    SysBusDevice *s;
     int success;
     int i;
     struct boot_info *boot_info;
 
     /* Setup CPU. */
-    if (args->cpu_model == NULL) {
-        args->cpu_model = "440EP";
+    if (machine->cpu_model == NULL) {
+        machine->cpu_model = "440EP";
     }
-    cpu = cpu_ppc_init(args->cpu_model);
+    cpu = cpu_ppc_init(machine->cpu_model);
     if (cpu == NULL) {
         fprintf(stderr, "Unable to initialize CPU!\n");
         exit(1);
@@ -1522,12 +1526,12 @@ static void sam460ex_init(QEMUMachineInitArgs *args)
     /* SDRAM controller */
     memset(ram_bases, 0, sizeof(ram_bases));
     memset(ram_sizes, 0, sizeof(ram_sizes));
-    args->ram_size = ppc4xx_sdram_adjust(args->ram_size,
+    machine->ram_size = ppc4xx_sdram_adjust(machine->ram_size,
                                    PPC440EP_SDRAM_NR_BANKS,
                                    ram_memories,
                                    ram_bases, ram_sizes,
                                    ppc440ep_sdram_bank_sizes);
-printf("RAMSIZE %dMB\n", (int)(args->ram_size / (1024 * 1024)));
+printf("RAMSIZE %dMB\n", (int)(machine->ram_size / (1024 * 1024)));
 
     /* XXX 440EP's ECC interrupts are on UIC1, but we've only created UIC0. */
     ppc4xx_sdram_init(env, pic[14], PPC440EP_SDRAM_NR_BANKS, ram_memories,
@@ -1544,12 +1548,12 @@ printf("RAMSIZE %dMB\n", (int)(args->ram_size / (1024 * 1024)));
     /* 256K of L2 cache as memory */
     ppc4xx_l2sram_init(env);
     /* FIXME:remove this */
-    memory_region_init_ram(l2cache_ram, "ppc440.l2cache_ram", 256 << 10);
+    memory_region_init_ram(l2cache_ram, NULL, "ppc440.l2cache_ram", 256 << 10, &error_abort);
     vmstate_register_ram_global(l2cache_ram);
     memory_region_add_subregion(address_space_mem, 0x400000000LL, l2cache_ram);
 
     /* 64K of on-chip memory */
-    memory_region_init_ram(ocm_ram, "ppc440.ocm_ram", 64 << 10);
+    memory_region_init_ram(ocm_ram, NULL, "ppc440.ocm_ram", 64 << 10, &error_abort);
     vmstate_register_ram_global(ocm_ram);
     memory_region_add_subregion(address_space_mem, 0x400040000LL, ocm_ram);
 
@@ -1559,12 +1563,25 @@ printf("RAMSIZE %dMB\n", (int)(args->ram_size / (1024 * 1024)));
     ppc4xx_i2c_init(0x4ef600800LL, pic[2]);
 
     /* PCI */
+    dev = qdev_create(NULL, "ppc4xx-pcihost");
+    qdev_init_nofail(dev);
+    s = SYS_BUS_DEVICE(dev);
+    sysbus_connect_irq(s, 0, pic[pci_irq_nrs[0]]);
+    sysbus_connect_irq(s, 1, pic[pci_irq_nrs[1]]);
+    sysbus_connect_irq(s, 2, pic[pci_irq_nrs[2]]);
+    sysbus_connect_irq(s, 3, pic[pci_irq_nrs[3]]);
+    memory_region_add_subregion(address_space_mem, PPC440EP_PCI_IO,
+                                sysbus_mmio_get_region(s, 0));
+/*XXX: FIXME: is this correct? */
+
+/*
     dev = sysbus_create_varargs("ppc4xx-pcihost", PPC440EP_PCI_CONFIG,
                                 pic[pci_irq_nrs[0]], pic[pci_irq_nrs[1]],
                                 pic[pci_irq_nrs[2]], pic[pci_irq_nrs[3]],
                                 NULL);
-    pcibus = (PCIBus *)qdev_get_child_bus(dev, "pci.0");
-    if (!pcibus) {
+*/
+    pci_bus = (PCIBus *)qdev_get_child_bus(dev, "pci.0");
+    if (!pci_bus) {
         fprintf(stderr, "couldn't create PCI controller!\n");
         exit(1);
     }
@@ -1574,7 +1591,7 @@ printf("RAMSIZE %dMB\n", (int)(args->ram_size / (1024 * 1024)));
                /*irq[SM501]FIXME*/pic[13], serial_hds[2]);
 #endif
 
-    isa_mmio_init(PPC440EP_PCI_IO, PPC440EP_PCI_IOLEN);
+    //sysbus_mmio_map(SYS_BUS_DEVICE(dev), 1, PPC440EP_PCI_IO);
 
     /* Core has 4 UARTs but the board only has one wired */
     if (serial_hds[0] != NULL) {
@@ -1583,17 +1600,17 @@ printf("RAMSIZE %dMB\n", (int)(args->ram_size / (1024 * 1024)));
                        DEVICE_BIG_ENDIAN);
     }
 
-    if (pcibus) {
+    if (pci_bus) {
         /* Register network interfaces. */
         for (i = 0; i < nb_nics; i++) {
             /* There are no PCI NICs on the Bamboo board, but there are
              * PCI slots, so we can pick whatever default model we want. */
-            pci_nic_init_nofail(&nd_table[i], "e1000", NULL);
+            pci_nic_init_nofail(&nd_table[i], pci_bus, "e1000", NULL);
         }
     }
 
     /* Load U-Boot image. */
-    if (!args->kernel_filename) {
+    if (!machine->kernel_filename) {
         success = sam460ex_load_uboot();
         if (success < 0) {
             fprintf(stderr, "qemu: could not load firmware\n");
@@ -1602,42 +1619,43 @@ printf("RAMSIZE %dMB\n", (int)(args->ram_size / (1024 * 1024)));
     }
 
     /* Load kernel. */
-    if (args->kernel_filename) {
-        success = load_uimage(args->kernel_filename, &entry, &loadaddr, NULL);
+    if (machine->kernel_filename) {
+        success = load_uimage(machine->kernel_filename, &entry, &loadaddr, NULL,
+            NULL, NULL);
         fprintf(stderr, "load_uimage: %d\n", success);
         if (success < 0) {
-            success = load_elf(args->kernel_filename, NULL, NULL, &elf_entry,
-                               &elf_lowaddr, NULL, 1, ELF_MACHINE, 0);
+            success = load_elf(machine->kernel_filename, NULL, NULL, &elf_entry,
+                               &elf_lowaddr, NULL, 1, PPC_ELF_MACHINE, 0);
             entry = elf_entry;
             loadaddr = elf_lowaddr;
         }
         /* XXX try again as binary */
         if (success < 0) {
             fprintf(stderr, "qemu: could not load kernel '%s'\n",
-                    args->kernel_filename);
+                    machine->kernel_filename);
             exit(1);
         }
     }
 
     /* Load initrd. */
-    if (args->initrd_filename) {
-        initrd_size = load_image_targphys(args->initrd_filename, RAMDISK_ADDR,
-                                          args->ram_size - RAMDISK_ADDR);
+    if (machine->initrd_filename) {
+        initrd_size = load_image_targphys(machine->initrd_filename, RAMDISK_ADDR,
+                                          machine->ram_size - RAMDISK_ADDR);
 
         if (initrd_size < 0) {
             fprintf(stderr, "qemu: could not load ram disk '%s' at %x\n",
-                    args->initrd_filename, RAMDISK_ADDR);
+                    machine->initrd_filename, RAMDISK_ADDR);
             exit(1);
         }
     }
 
     /* If we're loading a kernel directly, we must load the device tree too. */
-    if (args->kernel_filename) {
+    if (machine->kernel_filename) {
         int dt_size;
 
-        dt_size = sam460ex_load_device_tree(FDT_ADDR, args->ram_size,
+        dt_size = sam460ex_load_device_tree(FDT_ADDR, machine->ram_size,
                                     RAMDISK_ADDR, initrd_size,
-                                    args->kernel_cmdline);
+                                    machine->kernel_cmdline);
         if (dt_size < 0) {
             fprintf(stderr, "couldn't load device tree\n");
             exit(1);
@@ -1648,20 +1666,12 @@ printf("RAMSIZE %dMB\n", (int)(args->ram_size / (1024 * 1024)));
     }
 
     boot_info->entry = entry;
-
-    if (kvm_enabled())
-        kvmppc_init();
 }
 
-static QEMUMachine sam460ex_machine = {
-    .name = "sam460ex",
-    .desc = "aCube Sam460ex",
-    .init = sam460ex_init,
-};
-
-static void sam460ex_machine_init(void)
+static void sam460ex_machine_init(MachineClass *mc)
 {
-    qemu_register_machine(&sam460ex_machine);
+    mc->desc = "aCube Sam460ex";
+    mc->init = sam460ex_init;
 }
 
-machine_init(sam460ex_machine_init);
+DEFINE_MACHINE("sam460ex", sam460ex_machine_init)
