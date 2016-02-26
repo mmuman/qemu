@@ -1313,7 +1313,7 @@ int ppc_dcr_init (CPUPPCState *env, int (*read_error)(int dcrn),
     return 0;
 }
 
-void ppc_dump_dcr (CPUPPCState *env, FILE*f, fprintf_function cpu_fprintf,
+/*void ppc_dump_dcr (CPUPPCState *env, FILE*f, fprintf_function cpu_fprintf,
                    int flags)
 {
     ppc_dcr_t *dcr_env;
@@ -1333,6 +1333,7 @@ void ppc_dump_dcr (CPUPPCState *env, FILE*f, fprintf_function cpu_fprintf,
                     dcr->dcr_read(dcr->opaque, dcrn));
     }
 }
+*/
 
 /*****************************************************************************/
 /* Debug port */

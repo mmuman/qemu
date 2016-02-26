@@ -10,6 +10,7 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "config.h"
 #include "qemu-common.h"
 #include "net/net.h"
@@ -34,6 +35,7 @@
 #include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
 #include "hw/char/serial.h"
+#include "hw/i2c/i2c.h"
 
 /*
 #define DEBUG_L2SRAM
@@ -1028,10 +1030,43 @@ static void ppc4xx_ahb_init(CPUPPCState *env)
 
 /*****************************************************************************/
 /* I2C controller */
-typedef struct ppc4xx_i2c_t ppc4xx_i2c_t;
-struct ppc4xx_i2c_t {
-    qemu_irq irq;
+/* TODO: move to hw/i2c/ppc4xx_i2c.c */
+/* TODO: FIXME: regs are wrong (ppc405), cf. u-boot's include/4xx_i2c.h */
+
+#define TYPE_PPC4xx_I2C "ppc4xx.i2c"
+#define PPC4xx_I2C(obj) OBJECT_CHECK(PPC4xxI2CState, (obj), TYPE_PPC4xx_I2C)
+
+#define PPC4xx_I2C_MEM_SIZE           0x12
+
+typedef struct PPC4xxI2CState {
+    /*< private >*/
+    SysBusDevice parent_obj;
+
+    /*< public >*/
     MemoryRegion iomem;
+    I2CBus *bus;
+    qemu_irq irq;
+
+	/* according to u-boot's include/4xx_i2c.h */
+    uint8_t mdbuf;
+    uint8_t res1;
+    uint8_t sdbuf;
+    uint8_t res2;
+    uint8_t lmadr;
+    uint8_t hmadr;
+    uint8_t cntl;
+    uint8_t mdcntl;
+    uint8_t sts;
+    uint8_t extsts;
+    uint8_t lsadr;
+    uint8_t hsadr;
+    uint8_t clkdiv;
+    uint8_t intrmsk;
+    uint8_t xfrcnt;
+    uint8_t xtcntlss;
+    uint8_t directcntl;
+    uint8_t intr;
+/* ppc405 fields:
     uint8_t mdata;
     uint8_t lmadr;
     uint8_t hmadr;
@@ -1047,20 +1082,24 @@ struct ppc4xx_i2c_t {
     uint8_t xfrcnt;
     uint8_t xtcntlss;
     uint8_t directcntl;
-};
+*/
+} PPC4xxI2CState;
 
-static uint32_t ppc4xx_i2c_readb (void *opaque, hwaddr addr)
+static uint64_t ppc4xx_i2c_read (void *opaque, hwaddr addr, unsigned size)
 {
-    ppc4xx_i2c_t *i2c;
-    uint32_t ret;
+    PPC4xxI2CState *i2c = PPC4xx_I2C(opaque);
+    uint8_t ret;
 
 #ifdef DEBUG_I2C
-    printf("%s: addr " TARGET_FMT_plx "\n", __func__, addr);
+    printf("%s: addr " TARGET_FMT_plx " size %u\n", __func__, addr, size);
 #endif
-    i2c = opaque;
     switch (addr) {
+#if 0
     case 0x00:
         //        i2c_readbyte(&i2c->mdata);
+		if (i2c->lmadr == (0x50<<1)) {
+			i2c->mdata = 1;
+		}
         ret = i2c->mdata;
         break;
     case 0x02:
@@ -1102,6 +1141,7 @@ static uint32_t ppc4xx_i2c_readb (void *opaque, hwaddr addr)
     case 0x0F:
         ret = i2c->xtcntlss;
         break;
+#endif
     case 0x10:
         ret = i2c->directcntl;
         break;
@@ -1116,17 +1156,17 @@ static uint32_t ppc4xx_i2c_readb (void *opaque, hwaddr addr)
     return ret;
 }
 
-static void ppc4xx_i2c_writeb (void *opaque,
-                               hwaddr addr, uint32_t value)
+static void ppc4xx_i2c_write (void *opaque, hwaddr addr,
+                              uint64_t value, unsigned size)
 {
-    ppc4xx_i2c_t *i2c;
+    PPC4xxI2CState *i2c = PPC4xx_I2C(opaque);
 
 #ifdef DEBUG_I2C
-    printf("%s: addr " TARGET_FMT_plx " val %08" PRIx32 "\n", __func__, addr,
+    printf("%s: addr " TARGET_FMT_plx " val %08" PRIx64 "\n", __func__, addr,
            value);
 #endif
-    i2c = opaque;
     switch (addr) {
+#if 0
     case 0x00:
         i2c->mdata = value;
         //        i2c_sendbyte(&i2c->mdata);
@@ -1170,12 +1210,14 @@ static void ppc4xx_i2c_writeb (void *opaque,
     case 0x0F:
         i2c->xtcntlss = value;
         break;
+#endif
     case 0x10:
         i2c->directcntl = value & 0x7;
         break;
     }
 }
 
+#if 0
 static uint32_t ppc4xx_i2c_readw (void *opaque, hwaddr addr)
 {
     uint32_t ret;
@@ -1227,36 +1269,45 @@ static void ppc4xx_i2c_writel (void *opaque,
     ppc4xx_i2c_writeb(opaque, addr + 2, value >> 8);
     ppc4xx_i2c_writeb(opaque, addr + 3, value);
 }
+#endif
 
-static const MemoryRegionOps i2c_ops = {
-    .old_mmio = {
-        .read = { ppc4xx_i2c_readb, ppc4xx_i2c_readw, ppc4xx_i2c_readl, },
-        .write = { ppc4xx_i2c_writeb, ppc4xx_i2c_writew, ppc4xx_i2c_writel, },
-    },
-    .endianness = DEVICE_NATIVE_ENDIAN,
-};
-
-static void ppc4xx_i2c_reset (void *opaque)
+static void ppc4xx_i2c_reset (DeviceState *dev)
 {
-    ppc4xx_i2c_t *i2c;
+    PPC4xxI2CState *s = PPC4xx_I2C(dev);
 
-    i2c = opaque;
-    i2c->mdata = 0x00;
-    i2c->sdata = 0x00;
-    i2c->cntl = 0x00;
-    i2c->mdcntl = 0x00;
-    i2c->sts = 0x00;
-    i2c->extsts = 0x00;
-    i2c->clkdiv = 0x00;
-    i2c->xfrcnt = 0x00;
-    i2c->directcntl = 0x0F;
+/*
+	XXX
+    if (s->address != ADDR_RESET) {
+        i2c_end_transfer(s->bus);
+    }
+*/
+
+	s->mdbuf = 0x00;
+	s->res1 = 0x00;
+	s->sdbuf = 0x00;
+	s->res2 = 0x00;
+	s->lmadr = 0x00;
+	s->hmadr = 0x00;
+	s->cntl = 0x00;
+	s->mdcntl = 0x00;
+	s->sts = 0x00;
+	s->extsts = 0x00;
+	s->lsadr = 0x00;
+	s->hsadr = 0x00;
+	s->clkdiv = 0x00;
+	s->intrmsk = 0x00;
+	s->xfrcnt = 0x00;
+	s->xtcntlss = 0x00;
+	s->directcntl = 0x00;
+	s->intr = 0x00;
 }
 
+#if 0
 static void ppc4xx_i2c_init(hwaddr base, qemu_irq irq)
 {
-    ppc4xx_i2c_t *i2c;
+    PPC4xxI2CState *i2c;
 
-    i2c = g_malloc0(sizeof(ppc4xx_i2c_t));
+    i2c = g_malloc0(sizeof(PPC4xxI2CState));
     i2c->irq = irq;
 #ifdef DEBUG_I2C
     printf("%s: offset " TARGET_FMT_plx "\n", __func__, base);
@@ -1265,6 +1316,82 @@ static void ppc4xx_i2c_init(hwaddr base, qemu_irq irq)
     memory_region_add_subregion(get_system_memory(), base, &i2c->iomem);
     qemu_register_reset(ppc4xx_i2c_reset, i2c);
 }
+#endif
+
+static const MemoryRegionOps ppc4xx_i2c_ops = {
+    .read = ppc4xx_i2c_read,
+    .write = ppc4xx_i2c_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 1,/*XXX: allow larger access?? */
+    .endianness = DEVICE_NATIVE_ENDIAN,
+/*    .old_mmio = {
+        .read = { ppc4xx_i2c_readb, ppc4xx_i2c_readw, ppc4xx_i2c_readl, },
+        .write = { ppc4xx_i2c_writeb, ppc4xx_i2c_writew, ppc4xx_i2c_writel, },
+    },
+    .endianness = DEVICE_NATIVE_ENDIAN,
+*/
+};
+
+static const VMStateDescription ppc4xx_i2c_vmstate = {
+    .name = TYPE_PPC4xx_I2C,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+    	VMSTATE_UINT8(mdbuf, PPC4xxI2CState),
+    	VMSTATE_UINT8(res1, PPC4xxI2CState),
+    	VMSTATE_UINT8(sdbuf, PPC4xxI2CState),
+    	VMSTATE_UINT8(res2, PPC4xxI2CState),
+    	VMSTATE_UINT8(lmadr, PPC4xxI2CState),
+    	VMSTATE_UINT8(hmadr, PPC4xxI2CState),
+    	VMSTATE_UINT8(cntl, PPC4xxI2CState),
+    	VMSTATE_UINT8(mdcntl, PPC4xxI2CState),
+    	VMSTATE_UINT8(sts, PPC4xxI2CState),
+    	VMSTATE_UINT8(extsts, PPC4xxI2CState),
+    	VMSTATE_UINT8(lsadr, PPC4xxI2CState),
+    	VMSTATE_UINT8(hsadr, PPC4xxI2CState),
+    	VMSTATE_UINT8(clkdiv, PPC4xxI2CState),
+    	VMSTATE_UINT8(intrmsk, PPC4xxI2CState),
+    	VMSTATE_UINT8(xfrcnt, PPC4xxI2CState),
+    	VMSTATE_UINT8(xtcntlss, PPC4xxI2CState),
+    	VMSTATE_UINT8(directcntl, PPC4xxI2CState),
+    	VMSTATE_UINT8(intr, PPC4xxI2CState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static void ppc4xx_i2c_realize(DeviceState *dev, Error **errp)
+{
+    PPC4xxI2CState *s = PPC4xx_I2C(dev);
+
+    memory_region_init_io(&s->iomem, OBJECT(s), &ppc4xx_i2c_ops, s, TYPE_PPC4xx_I2C,
+                          PPC4xx_I2C_MEM_SIZE);
+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
+    s->bus = i2c_init_bus(DEVICE(dev), "i2c");
+}
+
+static void ppc4xx_i2c_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->vmsd = &ppc4xx_i2c_vmstate;
+    dc->reset = ppc4xx_i2c_reset;
+    dc->realize = ppc4xx_i2c_realize;
+}
+
+static const TypeInfo ppc4xx_i2c_type_info = {
+    .name = TYPE_PPC4xx_I2C,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(PPC4xxI2CState),
+    .class_init = ppc4xx_i2c_class_init,
+};
+
+static void ppc4xx_i2c_register_types(void)
+{
+    type_register_static(&ppc4xx_i2c_type_info);
+}
+
+type_init(ppc4xx_i2c_register_types)
 
 /*****************************************************************************/
 
@@ -1559,8 +1686,41 @@ printf("RAMSIZE %dMB\n", (int)(machine->ram_size / (1024 * 1024)));
 
     /* IIC controller */
     /* FIXME: irq? */
-    ppc4xx_i2c_init(0x4ef600700LL, pic[2]);
+    /*
+	ppc4xx_i2c_init(0x4ef600700LL, pic[2]);
     ppc4xx_i2c_init(0x4ef600800LL, pic[2]);
+	*/
+    for (i = 0; i < 2; i++) {
+        static const struct {
+            hwaddr addr;
+            unsigned int irq;
+        } i2c_table[2] = {
+            { 0x4ef600700LL, 0 },
+            { 0x4ef600800LL, 0 }
+        };
+		/*TODO: attach this to the machine state */
+		static struct {
+			PPC4xxI2CState i2c[2];
+		} _s, *s = &_s;
+	    Error *err = NULL;
+
+
+        object_initialize(&s->i2c[i], sizeof(s->i2c[i]), TYPE_PPC4xx_I2C);
+        qdev_set_parent_bus(DEVICE(&s->i2c[i]), sysbus_get_default());
+
+        object_property_set_bool(OBJECT(&s->i2c[i]), true, "realized", &err);
+        if (err) {
+	        fprintf(stderr, "Unable to initialize I2C[%d]!\n", i);
+            //error_propagate(errp, err);
+            return;
+        }
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[i]), 0, i2c_table[i].addr);
+		/*
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[i]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->avic),
+                                            i2c_table[i].irq));
+		*/
+    }
 
     /* PCI */
     dev = qdev_create(NULL, "ppc4xx-pcihost");
@@ -1586,7 +1746,7 @@ printf("RAMSIZE %dMB\n", (int)(machine->ram_size / (1024 * 1024)));
         exit(1);
     }
 
-#if 0
+#if 1
     sm501_init(address_space_mem, 0x10000000, SM501_VRAM_SIZE,
                /*irq[SM501]FIXME*/pic[13], serial_hds[2]);
 #endif
