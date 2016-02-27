@@ -36,12 +36,14 @@
 #include "hw/sysbus.h"
 #include "hw/char/serial.h"
 #include "hw/i2c/i2c.h"
+#include "hw/i2c/smbus.h"
 
 /*
 #define DEBUG_L2SRAM
 #define DEBUG_EBC
+*/
 #define DEBUG_SDR
-#define DEBUG_PLB
+/*#define DEBUG_PLB
 #define DEBUG_AHB
 */
 #define DEBUG_I2C
@@ -762,10 +764,30 @@ struct ppc4xx_sdr_t {
     uint32_t cfg;
 };
 
-enum {
-    SDR0_CFGADDR = 0x00e,
-    SDR0_CFGDATA = 0x00f,
+typedef struct ppc4xx_sdram_t ppc4xx_sdram_t;
+struct ppc4xx_sdram_t {
+    uint32_t addr;
 };
+
+enum {
+	SDRAM_R0BAS = 0x040,
+	SDRAM_R1BAS,
+	SDRAM_R2BAS,
+	SDRAM_R3BAS,
+	SDRAM_CONF1HB = 0x045,
+	SDRAM_PLBADDULL = 0x04a,
+	SDRAM_CONF1LL = 0x04b,
+	SDRAM_CONFPATHB = 0x04f,
+	SDRAM_PLBADDUHB = 0x050,
+	SDR0_CFGADDR = 0x00e,
+    SDR0_CFGDATA,
+    SDRAM0_CFGADDR = 0x010,
+    SDRAM0_CFGDATA,
+};
+
+#define SDR0_DDR0_DDRM_ENCODE(n)	((((unsigned long)(n))&0x03)<<29)
+#define SDR0_DDR0_DDRM_DDR1		0x20000000
+#define SDR0_DDR0_DDRM_DDR2		0x40000000
 
 static uint32_t dcr_read_sdr (void *opaque, int dcrn)
 {
@@ -782,6 +804,10 @@ static uint32_t dcr_read_sdr (void *opaque, int dcrn)
         break;
     case SDR0_CFGDATA:
         switch (sdr->addr) {
+        case 0x00E1: /* SDR0_DDR0 */
+			// XXX:whatever
+            ret = SDR0_DDR0_DDRM_ENCODE(2) | SDR0_DDR0_DDRM_DDR1;
+            break;
         default:
             ret = 0x00000000;
             break;
@@ -844,9 +870,122 @@ static void sdr_reset (void *opaque)
     sdr->cfg = 0x80400000;
 }
 
+static uint32_t dcr_read_sdram (void *opaque, int dcrn)
+{
+    ppc4xx_sdram_t *sdram;
+    uint32_t ret;
+
+    sdram = opaque;
+#ifdef DEBUG_SDR
+        printf("read DCR[%04x]\n", dcrn);
+#endif
+    switch (dcrn) {
+	case SDRAM_R0BAS:
+		ret = 0x0000C000;
+		break;
+	case SDRAM_R1BAS:
+	case SDRAM_R2BAS:
+	case SDRAM_R3BAS:
+	case SDRAM_CONF1HB:
+	case SDRAM_CONF1LL:
+	case SDRAM_CONFPATHB:
+	case SDRAM_PLBADDULL:
+	case SDRAM_PLBADDUHB:
+		ret = 0;
+		break;
+    case SDRAM0_CFGADDR:
+        ret = sdram->addr;
+#ifdef DEBUG_SDR
+        printf("read DCR[SDRAMADDR]: %08" PRIx32 "\n", ret);
+#endif
+        break;
+    case SDRAM0_CFGDATA:
+        switch (sdram->addr) {
+		case 0x0014: /* SDRAM_MCSTAT (405EX) */
+		case 0x001F:
+			ret = 0x80000000;
+			break;
+		case 0x0021: /* SDRAM_MCOPT2 */
+			ret = 0x08000000;
+			break;
+		case 0x0040: /* SDRAM_MB0CF */
+			ret = 0x00008001;
+			break;
+		case 0x007A: /* SDRAM_DLCR */
+			ret = 0x02000000;
+			break;
+        case 0x00E1: /* SDR0_DDR0 */
+            ret = SDR0_DDR0_DDRM_ENCODE(2) | SDR0_DDR0_DDRM_DDR1;
+            break;
+        default:
+            ret = 0x00000000;
+            break;
+        }
+#ifdef DEBUG_SDR
+        printf("read DCR[SDRAMDATA]: %08" PRIx32 "\n", ret);
+#endif
+        break;
+    default:
+        ret = 0x00000000;
+        break;
+    }
+
+    return ret;
+}
+
+static void dcr_write_sdram (void *opaque, int dcrn, uint32_t val)
+{
+    ppc4xx_sdram_t *sdram;
+
+    sdram = opaque;
+#ifdef DEBUG_SDR
+        printf("write DCR[%04x]: %08" PRIx32 "\n", dcrn, val);
+#endif
+    switch (dcrn) {
+	case SDRAM_R0BAS:
+	case SDRAM_R1BAS:
+	case SDRAM_R2BAS:
+	case SDRAM_R3BAS:
+	case SDRAM_CONF1HB:
+	case SDRAM_CONF1LL:
+	case SDRAM_CONFPATHB:
+	case SDRAM_PLBADDULL:
+	case SDRAM_PLBADDUHB:
+		break;
+    case SDRAM0_CFGADDR:
+        sdram->addr = val;
+#ifdef DEBUG_SDR
+        printf("write DCR[SDRAMADDR]: %08" PRIx32 "\n", val);
+#endif
+        break;
+    case SDRAM0_CFGDATA:
+#ifdef DEBUG_SDR
+        printf("write DCR[SDRAMDATA]: %08" PRIx32 "\n", val);
+#endif
+        switch (sdram->addr) {
+        case 0x00: /* B0CR */
+            break;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void sdram_reset (void *opaque)
+{
+    ppc4xx_sdram_t *sdram;
+
+    sdram = opaque;
+    sdram->addr = 0x00000000;
+}
+
 static void ppc4xx_sdr_init(CPUPPCState *env)
 {
     ppc4xx_sdr_t *sdr;
+    ppc4xx_sdram_t *sdram;
 
     sdr = g_malloc0(sizeof(ppc4xx_sdr_t));
     qemu_register_reset(&sdr_reset, sdr);
@@ -854,6 +993,34 @@ static void ppc4xx_sdr_init(CPUPPCState *env)
                      sdr, &dcr_read_sdr, &dcr_write_sdr);
     ppc_dcr_register(env, SDR0_CFGDATA,
                      sdr, &dcr_read_sdr, &dcr_write_sdr);
+
+    sdram = g_malloc0(sizeof(ppc4xx_sdram_t));
+    qemu_register_reset(&sdram_reset, sdram);
+
+    ppc_dcr_register(env, SDRAM0_CFGADDR,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+    ppc_dcr_register(env, SDRAM0_CFGDATA,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+
+    ppc_dcr_register(env, SDRAM_R0BAS,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+    ppc_dcr_register(env, SDRAM_R1BAS,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+    ppc_dcr_register(env, SDRAM_R2BAS,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+    ppc_dcr_register(env, SDRAM_R3BAS,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+    ppc_dcr_register(env, SDRAM_CONF1HB,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+    ppc_dcr_register(env, SDRAM_PLBADDULL,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+    ppc_dcr_register(env, SDRAM_CONF1LL,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+    ppc_dcr_register(env, SDRAM_CONFPATHB,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+    ppc_dcr_register(env, SDRAM_PLBADDUHB,
+                     sdram, &dcr_read_sdram, &dcr_write_sdram);
+
 }
 
 /*****************************************************************************/
@@ -1038,6 +1205,19 @@ static void ppc4xx_ahb_init(CPUPPCState *env)
 
 #define PPC4xx_I2C_MEM_SIZE           0x12
 
+#define IIC_CNTL_PT                   (1 << 0)
+#define IIC_CNTL_READ                 (1 << 1)
+#define IIC_CNTL_CHT                  (1 << 2)
+#define IIC_CNTL_RPST                 (1 << 3)
+
+#define IIC_STS_PT                    (1 << 0)
+#define IIC_STS_ERR                   (1 << 2)
+#define IIC_STS_MDBS                  (1 << 5)
+
+#define IIC_EXTSTS_XFRA               (1 << 0)
+
+#define IIC_XTCNTLSS_SRST             (1 << 0)
+
 typedef struct PPC4xxI2CState {
     /*< private >*/
     SysBusDevice parent_obj;
@@ -1085,134 +1265,312 @@ typedef struct PPC4xxI2CState {
 */
 } PPC4xxI2CState;
 
-static uint64_t ppc4xx_i2c_read (void *opaque, hwaddr addr, unsigned size)
+static inline bool ppc4xx_i2c_is_master(PPC4xxI2CState *s)
 {
-    PPC4xxI2CState *i2c = PPC4xx_I2C(opaque);
-    uint8_t ret;
+	//TODO
+    return true;
+}
+
+static void ppc4xx_i2c_reset (DeviceState *dev)
+{
+    PPC4xxI2CState *s = PPC4xx_I2C(dev);
+
+/*
+	XXX
+    if (s->address != ADDR_RESET) {
+        i2c_end_transfer(s->bus);
+    }
+*/
+/* TODO: find correct values */
+	s->mdbuf = 0x00;
+	s->res1 = 0x00;
+	s->sdbuf = 0x00;
+	s->res2 = 0x00;
+	s->lmadr = 0x00;
+	s->hmadr = 0x00;
+	s->cntl = 0x00;
+	s->mdcntl = 0x00;
+	s->sts = 0;//0x0a;
+	s->extsts = 0x8f;
+	s->lsadr = 0x00;
+	s->hsadr = 0x00;
+	s->clkdiv = 0x00;
+	s->intrmsk = 0x00;
+	s->xfrcnt = 0x00;
+	s->xtcntlss = 0x00;
+	s->directcntl = 0x0f;
+	s->intr = 0x00;
+}
+
+static inline void ppc4xx_i2c_raise_interrupt(PPC4xxI2CState *s)
+{
+    /*
+     * raise an interrupt if the device is enabled and it is configured
+     * to generate some interrupts.
+     */
+	//TODO
+}
+
+static uint64_t ppc4xx_i2c_read (void *opaque, hwaddr offset, unsigned size)
+{
+    PPC4xxI2CState *s = PPC4xx_I2C(opaque);
+    int ret;
+
+	// XXX: handle >1 byte reads?
 
 #ifdef DEBUG_I2C
-    printf("%s: addr " TARGET_FMT_plx " size %u\n", __func__, addr, size);
+    printf("%s: addr " TARGET_FMT_plx " size %u\n", __func__, offset, size);
 #endif
-    switch (addr) {
-#if 0
+    switch (offset) {
     case 0x00:
-        //        i2c_readbyte(&i2c->mdata);
-		if (i2c->lmadr == (0x50<<1)) {
-			i2c->mdata = 1;
+        ret = s->mdbuf;
+		if (ppc4xx_i2c_is_master(s)) {
+            ret = 0xff;
+
+            if ((s->sts & IIC_STS_MDBS) == 0) {
+                /* something is wrong as the address is not set */
+                qemu_log_mask(LOG_GUEST_ERROR, "[%s]%s: Trying to read "
+                              "without starting transfer\n",
+                              TYPE_PPC4xx_I2C, __func__);
+            } else {
+				int pending = (s->cntl >> 4) & 0x03;
+
+                /* get the next byte */
+                ret = i2c_recv(s->bus);
+printf("received byte %04x\n", ret);
+
+                if (ret >= 0) {
+                    ppc4xx_i2c_raise_interrupt(s);
+                } else {
+                    qemu_log_mask(LOG_GUEST_ERROR, "[%s]%s: read failed "
+                                  "for device 0x%02x\n", TYPE_PPC4xx_I2C,
+                                  __func__, s->lmadr);
+                    ret = 0xff;
+                }
+
+				if (pending == 0) {
+	                s->sts &= ~IIC_STS_MDBS;
+					//i2c_end_transfer(s->bus);
+				//} else if (s->cntl & (IIC_CNTL_RPST|IIC_CNTL_CHT)) {
+				} else if (pending) {
+					/* current smbus implementation doesn't like multibyte xfer */
+					/* repeated start */
+					i2c_end_transfer(s->bus);
+		            if (i2c_start_transfer(s->bus, s->lmadr >> 1, 1)) {
+		                /* if non zero is returned, the adress is not valid */
+		                s->sts &= ~IIC_STS_PT;
+		                s->sts |= IIC_STS_ERR;
+		                s->extsts |= IIC_EXTSTS_XFRA;
+		            } else {
+		                //s->sts |= IIC_STS_PT;
+						s->sts |= IIC_STS_MDBS;
+		                s->sts &= ~IIC_STS_ERR;
+		                s->extsts = 0;
+		            }
+				}
+				pending--;
+				s->cntl = (s->cntl & 0xcf) | (pending << 4);
+			}
+        } else {
+            qemu_log_mask(LOG_UNIMP, "[%s]%s: slave mode not implemented\n",
+                          TYPE_PPC4xx_I2C, __func__);
 		}
-        ret = i2c->mdata;
+        break;
+    case 0x01:
+        ret = s->res1;
         break;
     case 0x02:
-        ret = i2c->sdata;
+        ret = s->sdbuf;
+        break;
+    case 0x03:
+        ret = s->res2;
         break;
     case 0x04:
-        ret = i2c->lmadr;
+        ret = s->lmadr;
         break;
     case 0x05:
-        ret = i2c->hmadr;
+        ret = s->hmadr;
         break;
     case 0x06:
-        ret = i2c->cntl;
+        ret = s->cntl;
         break;
     case 0x07:
-        ret = i2c->mdcntl;
+        ret = s->mdcntl;
         break;
     case 0x08:
-        ret = i2c->sts;
+        ret = s->sts;
         break;
     case 0x09:
-        ret = i2c->extsts;
+        ret = s->extsts;
         break;
-    case 0x0A:
-        ret = i2c->lsadr;
+    case 0x0a:
+        ret = s->lsadr;
         break;
-    case 0x0B:
-        ret = i2c->hsadr;
+    case 0x0b:
+        ret = s->hsadr;
         break;
-    case 0x0C:
-        ret = i2c->clkdiv;
+    case 0x0c:
+        ret = s->clkdiv;
         break;
-    case 0x0D:
-        ret = i2c->intrmsk;
+    case 0x0d:
+        ret = s->intrmsk;
         break;
-    case 0x0E:
-        ret = i2c->xfrcnt;
+    case 0x0e:
+        ret = s->xfrcnt;
         break;
-    case 0x0F:
-        ret = i2c->xtcntlss;
+    case 0x0f:
+        ret = s->xtcntlss;
         break;
-#endif
     case 0x10:
-        ret = i2c->directcntl;
+        ret = s->directcntl;
+        break;
+    case 0x11:
+        ret = s->intr;
         break;
     default:
+        qemu_log_mask(LOG_GUEST_ERROR, "[%s]%s: Bad address at offset 0x%"
+                      HWADDR_PRIx "\n", TYPE_PPC4xx_I2C, __func__, offset);
         ret = 0x00;
         break;
     }
 #ifdef DEBUG_I2C
-    printf("%s: addr " TARGET_FMT_plx " %02" PRIx32 "\n", __func__, addr, ret);
+    printf("%s: addr " TARGET_FMT_plx " %02" PRIx32 "\n", __func__, offset, ret);
 #endif
 
     return ret;
 }
 
-static void ppc4xx_i2c_write (void *opaque, hwaddr addr,
+static void ppc4xx_i2c_write (void *opaque, hwaddr offset,
                               uint64_t value, unsigned size)
 {
-    PPC4xxI2CState *i2c = PPC4xx_I2C(opaque);
+    PPC4xxI2CState *s = PPC4xx_I2C(opaque);
+
+	//XXX: handle >1 byte writes
 
 #ifdef DEBUG_I2C
-    printf("%s: addr " TARGET_FMT_plx " val %08" PRIx64 "\n", __func__, addr,
-           value);
+    printf("%s: addr " TARGET_FMT_plx " size %u val %08" PRIx64 "\n", __func__, offset,
+           size, value);
 #endif
-    switch (addr) {
-#if 0
+    switch (offset) {
     case 0x00:
-        i2c->mdata = value;
-        //        i2c_sendbyte(&i2c->mdata);
+        s->mdbuf = value;
+		if (!i2c_bus_busy(s->bus)) {
+			/* assume we start a write transfer */
+			
+            if (i2c_start_transfer(s->bus, s->lmadr >> 1, 0)) {
+                /* if non zero is returned, the adress is not valid */
+                s->sts &= ~IIC_STS_PT;
+                s->sts |= IIC_STS_ERR;
+                s->extsts |= IIC_EXTSTS_XFRA;
+            } else {
+                s->sts |= IIC_STS_PT;
+                s->sts &= ~IIC_STS_ERR;
+                s->extsts = 0;
+            }
+		}
+		if (i2c_bus_busy(s->bus)) {
+printf("sending byte %02x\n", s->mdbuf);
+            if (i2c_send(s->bus, s->mdbuf)) {
+                /* if the target return non zero then end the transfer */
+                s->sts &= ~IIC_STS_PT;
+                s->sts |= IIC_STS_ERR;
+                s->extsts |= IIC_EXTSTS_XFRA;
+                i2c_end_transfer(s->bus);
+            }
+		}
+        break;
+    case 0x01:
+        s->res1 = value;
         break;
     case 0x02:
-        i2c->sdata = value;
+        s->sdbuf = value;
+        break;
+    case 0x03:
+        s->res2 = value;
         break;
     case 0x04:
-        i2c->lmadr = value;
+        s->lmadr = value;
+		if (i2c_bus_busy(s->bus)) {
+printf("ending busy xfer\n");
+			i2c_end_transfer(s->bus);
+		}
+#ifdef DEBUG_I2C
+    printf("%s: device addr %02x\n", __func__, s->lmadr);
+#endif
         break;
     case 0x05:
-        i2c->hmadr = value;
+        s->hmadr = value;
         break;
     case 0x06:
-        i2c->cntl = value;
+        s->cntl = value;
+		if (s->cntl & IIC_CNTL_PT) {
+			if (s->cntl & IIC_CNTL_READ) {
+printf("read xfer %d\n", ((s->cntl >> 4) & 0x03) + 1);
+				if (i2c_bus_busy(s->bus)) {
+					/* end previous transfer */
+	                s->sts &= ~IIC_STS_PT;
+					i2c_end_transfer(s->bus);
+				}
+	            if (i2c_start_transfer(s->bus, s->lmadr >> 1, 1)) {
+	                /* if non zero is returned, the adress is not valid */
+	                s->sts &= ~IIC_STS_PT;
+	                s->sts |= IIC_STS_ERR;
+	                s->extsts |= IIC_EXTSTS_XFRA;
+	            } else {
+	                //s->sts |= IIC_STS_PT;
+					s->sts |= IIC_STS_MDBS;
+	                s->sts &= ~IIC_STS_ERR;
+	                s->extsts = 0;
+	            }
+			} else {
+printf("write xfer %d\n", ((s->cntl >> 4) & 0x03) + 1);
+				/* we actually already did the write transfer... */
+                s->sts &= ~IIC_STS_PT;
+			}
+		}
         break;
     case 0x07:
-        i2c->mdcntl = value & 0xDF;
+        s->mdcntl = value & 0xDF; /*XXX: ppc403 */
         break;
     case 0x08:
-        i2c->sts &= ~(value & 0x0A);
+        s->sts &= ~(value & 0x0A); /*XXX: ppc403 */
         break;
     case 0x09:
-        i2c->extsts &= ~(value & 0x8F);
+        s->extsts &= ~(value & 0x8F); /*XXX: ppc403 */
         break;
-    case 0x0A:
-        i2c->lsadr = value;
+    case 0x0a:
+        s->lsadr = value;
+        /* i2c_set_slave_address(s->bus, (uint8_t)s->lsadr); */
         break;
-    case 0x0B:
-        i2c->hsadr = value;
+    case 0x0b:
+        s->hsadr = value;
         break;
-    case 0x0C:
-        i2c->clkdiv = value;
+    case 0x0c:
+        s->clkdiv = value;
         break;
-    case 0x0D:
-        i2c->intrmsk = value;
+    case 0x0d:
+        s->intrmsk = value;
         break;
-    case 0x0E:
-        i2c->xfrcnt = value & 0x77;
+    case 0x0e:
+        s->xfrcnt = value & 0x77; /*XXX: ppc403 */
         break;
-    case 0x0F:
-        i2c->xtcntlss = value;
+    case 0x0f:
+		if (value & IIC_XTCNTLSS_SRST) {
+			/* XXX: is it actually a full reset? U-Boot sets some regs before */
+			ppc4xx_i2c_reset(DEVICE(s));
+			break;
+		}
+        s->xtcntlss = value;
         break;
-#endif
     case 0x10:
-        i2c->directcntl = value & 0x7;
+        s->directcntl = value & 0x7; /*XXX: ppc403 */
+        break;
+    case 0x11:
+        s->intr = value;
+        break;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR, "[%s]%s: Bad address at offset 0x%"
+                      HWADDR_PRIx "\n", TYPE_PPC4xx_I2C, __func__, offset);
         break;
     }
 }
@@ -1270,37 +1628,6 @@ static void ppc4xx_i2c_writel (void *opaque,
     ppc4xx_i2c_writeb(opaque, addr + 3, value);
 }
 #endif
-
-static void ppc4xx_i2c_reset (DeviceState *dev)
-{
-    PPC4xxI2CState *s = PPC4xx_I2C(dev);
-
-/*
-	XXX
-    if (s->address != ADDR_RESET) {
-        i2c_end_transfer(s->bus);
-    }
-*/
-
-	s->mdbuf = 0x00;
-	s->res1 = 0x00;
-	s->sdbuf = 0x00;
-	s->res2 = 0x00;
-	s->lmadr = 0x00;
-	s->hmadr = 0x00;
-	s->cntl = 0x00;
-	s->mdcntl = 0x00;
-	s->sts = 0x00;
-	s->extsts = 0x00;
-	s->lsadr = 0x00;
-	s->hsadr = 0x00;
-	s->clkdiv = 0x00;
-	s->intrmsk = 0x00;
-	s->xfrcnt = 0x00;
-	s->xtcntlss = 0x00;
-	s->directcntl = 0x00;
-	s->intr = 0x00;
-}
 
 #if 0
 static void ppc4xx_i2c_init(hwaddr base, qemu_irq irq)
@@ -1392,6 +1719,134 @@ static void ppc4xx_i2c_register_types(void)
 }
 
 type_init(ppc4xx_i2c_register_types)
+
+/*****************************************************************************/
+/* SPD eeprom content from mips_malta.c */
+
+struct _eeprom24c0x_t {
+  uint8_t tick;
+  uint8_t address;
+  uint8_t command;
+  uint8_t ack;
+  uint8_t scl;
+  uint8_t sda;
+  uint8_t data;
+  //~ uint16_t size;
+  uint8_t contents[256];
+};
+
+typedef struct _eeprom24c0x_t eeprom24c0x_t;
+
+static eeprom24c0x_t spd_eeprom = {
+    .contents = {
+        /* 00000000: */ 0x80,0x08,0xFF,0x0D,0x0A,0xFF,0x40,0x00,
+        /* 00000008: */ 0x04,0x75,0x54,0x00,0x82,0x08,0x00,0x01,
+        /* 00000010: */ 0x8F,0x04,0x02,0x01,0x01,0x00,0x00,0x00,
+        /* 00000018: */ 0x00,0x00,0x00,0x14,0x0F,0x14,0x2D,0xFF,
+        /* 00000020: */ 0x15,0x08,0x15,0x08,0x00,0x00,0x00,0x00,
+        /* 00000028: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        /* 00000030: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        /* 00000038: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x12,0xD0,
+        /* 00000040: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        /* 00000048: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        /* 00000050: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        /* 00000058: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        /* 00000060: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        /* 00000068: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        /* 00000070: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        /* 00000078: */ 0x00,0x00,0x00,0x00,0x00,0x00,0x64,0xF4,
+    },
+};
+
+static void generate_eeprom_spd(uint8_t *eeprom, ram_addr_t ram_size)
+{
+    enum { SDR = 0x4, DDR1 = 0x7, DDR2 = 0x8 } type;
+    uint8_t *spd = spd_eeprom.contents;
+    uint8_t nbanks = 0;
+    uint16_t density = 0;
+    int i;
+
+    /* work in terms of MB */
+    ram_size >>= 20;
+
+    while ((ram_size >= 4) && (nbanks <= 2)) {
+        int sz_log2 = MIN(31 - clz32(ram_size), 14);
+        nbanks++;
+        density |= 1 << (sz_log2 - 2);
+        ram_size -= 1 << sz_log2;
+    }
+
+    /* split to 2 banks if possible */
+    if ((nbanks == 1) && (density > 1)) {
+        nbanks++;
+        density >>= 1;
+    }
+
+    if (density & 0xff00) {
+        density = (density & 0xe0) | ((density >> 8) & 0x1f);
+        type = DDR2;
+    } else if (!(density & 0x1f)) {
+        type = DDR2;
+    } else {
+        type = SDR;
+    }
+
+    if (ram_size) {
+        fprintf(stderr, "Warning: SPD cannot represent final %dMB"
+                " of SDRAM\n", (int)ram_size);
+    }
+
+    /* fill in SPD memory information */
+    spd[2] = type;
+    spd[5] = nbanks;
+    spd[31] = density;
+printf("SPD: nbanks %d density %d\n", nbanks, density);
+	/* XXX: this is totally random */
+    spd[9] = 0x10; /* CAS tcyc */
+    spd[18] = 0x20; /* CAS bit */
+    spd[23] = 0x10; /* CAS tcyc */
+    spd[25] = 0x10; /* CAS tcyc */
+
+    /* checksum */
+    spd[63] = 0;
+    for (i = 0; i < 63; i++) {
+        spd[63] += spd[i];
+    }
+
+    /* copy for SMBUS */
+    memcpy(eeprom, spd, sizeof(spd_eeprom.contents));
+}
+
+static void generate_eeprom_serial(uint8_t *eeprom)
+{
+    int i, pos = 0;
+    uint8_t mac[6] = { 0x00 };
+    uint8_t sn[5] = { 0x01, 0x23, 0x45, 0x67, 0x89 };
+
+    /* version */
+    eeprom[pos++] = 0x01;
+
+    /* count */
+    eeprom[pos++] = 0x02;
+
+    /* MAC address */
+    eeprom[pos++] = 0x01; /* MAC */
+    eeprom[pos++] = 0x06; /* length */
+    memcpy(&eeprom[pos], mac, sizeof(mac));
+    pos += sizeof(mac);
+
+    /* serial number */
+    eeprom[pos++] = 0x02; /* serial */
+    eeprom[pos++] = 0x05; /* length */
+    memcpy(&eeprom[pos], sn, sizeof(sn));
+    pos += sizeof(sn);
+
+    /* checksum */
+    eeprom[pos] = 0;
+    for (i = 0; i < pos; i++) {
+        eeprom[pos] += eeprom[i];
+    }
+}
 
 /*****************************************************************************/
 
@@ -1614,6 +2069,8 @@ static void sam460ex_init(MachineState *machine)
     int success;
     int i;
     struct boot_info *boot_info;
+    const size_t smbus_eeprom_size = 8 * 256;
+    uint8_t *smbus_eeprom_buf = g_malloc0(smbus_eeprom_size);
 
     /* Setup CPU. */
     if (machine->cpu_model == NULL) {
@@ -1660,9 +2117,19 @@ static void sam460ex_init(MachineState *machine)
                                    ppc440ep_sdram_bank_sizes);
 printf("RAMSIZE %dMB\n", (int)(machine->ram_size / (1024 * 1024)));
 
+	/* XXX: is this needed? */
     /* XXX 440EP's ECC interrupts are on UIC1, but we've only created UIC0. */
+//XXX: this hides our own SDRAM DCR (0x10)
     ppc4xx_sdram_init(env, pic[14], PPC440EP_SDRAM_NR_BANKS, ram_memories,
                       ram_bases, ram_sizes, 1);
+
+    /* generate SPD EEPROM data */
+	for (int i = 0; i < 1/*PPC440EP_SDRAM_NR_BANKS*/; i++) {
+		printf("bank %d: %lu\n", i, ram_sizes[i]);
+        generate_eeprom_spd(&smbus_eeprom_buf[i * 256], ram_sizes[i]);
+	}
+    generate_eeprom_serial(&smbus_eeprom_buf[4 * 256]);
+    generate_eeprom_serial(&smbus_eeprom_buf[6 * 256]);
 
     /* External bus controller */
     ppc4xx_ebc_init(env);
@@ -1720,7 +2187,10 @@ printf("RAMSIZE %dMB\n", (int)(machine->ram_size / (1024 * 1024)));
                            qdev_get_gpio_in(DEVICE(&s->avic),
                                             i2c_table[i].irq));
 		*/
+		// XXX: which I2C bus should it be on? for now we put on each of them
+		smbus_eeprom_init(s->i2c[i].bus, 8, smbus_eeprom_buf, smbus_eeprom_size);
     }
+    g_free(smbus_eeprom_buf);
 
     /* PCI */
     dev = qdev_create(NULL, "ppc4xx-pcihost");
@@ -1832,6 +2302,7 @@ static void sam460ex_machine_init(MachineClass *mc)
 {
     mc->desc = "aCube Sam460ex";
     mc->init = sam460ex_init;
+	mc->default_ram_size = 512 * M_BYTE;
 }
 
 DEFINE_MACHINE("sam460ex", sam460ex_machine_init)
