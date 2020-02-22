@@ -15,10 +15,14 @@
  *
  * This code is licensed under the GPL
  */
-#include "hw/hw.h"
+#include "qemu/osdep.h"
+#include "hw/irq.h"
+#include "hw/sysbus.h"
+#include "qemu/module.h"
 #include "hw/m68k/mcf.h"
-#include "sysemu/char.h"
-#include "exec/address-spaces.h"
+#include "hw/qdev-properties.h"
+#include "chardev/char-fe.h"
+#include "qapi/error.h"
 
 #define PSC_DEBUG
 #ifdef PSC_DEBUG
@@ -48,7 +52,7 @@ typedef struct {
     int tx_enabled;
     int rx_enabled;
     qemu_irq irq;
-    Chardev *chr;
+    CharBackend chr;
 } mcf_psc_state;
 
 /* PSC Status Register bits.  */
@@ -116,7 +120,7 @@ uint64_t mcf_psc_read(void *opaque, hwaddr addr,
             if (s->rx_fifo_len == 0)
                 s->sr &= ~MCF_PSC_RxRDY;
             mcf_psc_update(s);
-            qemu_chr_accept_input(s->chr);
+            qemu_chr_fe_accept_input(&s->chr);
             return val;
         }
     case 0x10:
@@ -134,8 +138,11 @@ uint64_t mcf_psc_read(void *opaque, hwaddr addr,
 static void mcf_psc_do_tx(mcf_psc_state *s)
 {
     if (s->tx_enabled && (s->sr & MCF_PSC_TxEMP) == 0) {
-        if (s->chr)
-            qemu_chr_fe_write(s->chr, (unsigned char *)&s->tb, 1);
+        if (s->chr.chr) {
+            /* XXX this blocks entire thread. Rewrite to use
+             * qemu_chr_fe_write and background I/O callbacks */
+            qemu_chr_fe_write_all(&s->chr, (unsigned char *)&s->tb, 1);
+        }
         s->sr |= MCF_PSC_TxEMP;
     }
     if (s->tx_enabled) {
@@ -267,7 +274,7 @@ static void mcf_psc_push_byte(mcf_psc_state *s, uint8_t data)
     mcf_psc_update(s);
 }
 
-static void mcf_psc_event(void *opaque, int event)
+static void mcf_psc_event(void *opaque, QEMUChrEvent event)
 {
     mcf_psc_state *s = (mcf_psc_state *)opaque;
 
@@ -300,12 +307,11 @@ void *mcf_psc_init(qemu_irq irq, Chardev *chr)
     mcf_psc_state *s;
 
     s = g_malloc0(sizeof(mcf_psc_state));
-    s->chr = chr;
     s->irq = irq;
     if (chr) {
-        qemu_chr_fe_claim_no_fail(chr);
-        qemu_chr_add_handlers(chr, mcf_psc_can_receive, mcf_psc_receive,
-                              mcf_psc_event, s);
+        qemu_chr_fe_init(&s->chr, chr, &error_abort);
+        qemu_chr_fe_set_handlers(&s->chr, mcf_psc_can_receive, mcf_psc_receive,
+                                 mcf_psc_event, NULL, s, NULL, true);
     }
     mcf_psc_reset(s);
     return s;
