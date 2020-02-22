@@ -168,7 +168,7 @@ void HELPER(cf_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
         env->cacr = val;
         m68k_switch_sp(env);
         break;
-    case 0x03:
+    case M68K_CR_ASID:
         env->asid = val;
         break;
     case M68K_CR_ACR0:
