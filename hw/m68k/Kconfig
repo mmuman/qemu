@@ -3,6 +3,11 @@ config AN5206
     select COLDFIRE
     select PTIMER
 
+config FIREBEE
+    bool
+    select COLDFIRE
+    select PFLASH_CFI02
+
 config MCF5208
     bool
     select COLDFIRE
