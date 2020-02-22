@@ -101,10 +101,10 @@ static void mcf_slt_write(void *opaque, hwaddr addr,
         s->cr &= ~(MCF_SLT_RUN | MCF_SLT_IEN | MCF_SLT_TEN);
         value &= (MCF_SLT_RUN | MCF_SLT_IEN | MCF_SLT_TEN);
         s->cr |= value;
-        
+
         ptimer_stop(s->timer);
         if (s->cr & MCF_SLT_TEN) {
-            ptimer_run(s->timer, !(s->cr & MCF_SLT_RUN));   
+            ptimer_run(s->timer, !(s->cr & MCF_SLT_RUN));
         } else {
             ptimer_set_limit(s->timer, s->tcnt, 1);
         }
@@ -186,7 +186,7 @@ static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
 {
     if (unm_last != addr) {
         if (unm_count > 0) {
-            FB_DPRINTF("\tx%d times\n", unm_count+1);    
+            FB_DPRINTF("\tx%d times\n", unm_count+1);
         }
         unm_count = 0;
         unm_last = addr;
@@ -194,12 +194,12 @@ static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
         unm_count++;
         if (unm_count >= 500) {
             FB_DPRINTF("\tEndless loop detected, aborting.\n");
-            exit(-1);   
+            exit(-1);
         }
     }
     /* Unlocks fpga_init() (uses GPIO) */
     if (addr == 0xff000a27) {
-        return (1 << 0) | (fpga_done << 5); 
+        return (1 << 0) | (fpga_done << 5);
     }
     /* I2C */
     if ( (addr & ~0x3f) == 0xff008f00) {
@@ -230,7 +230,7 @@ static uint64_t firebee_unmapped_read(void *opaque, hwaddr addr,
         if (!unm_count) {
             FB_DPRINTF("FEC0 read @%lx(%d)\n", addr & 0x3ff, size);
         }
-        if ( (addr & 0x3ff) == 0x004) {   
+        if ( (addr & 0x3ff) == 0x004) {
             return (1 << 28); // GRA - Graceful Stop
             // return -1;
         }
@@ -263,15 +263,15 @@ static void firebee_unmapped_write(void *opaque, hwaddr addr,
         return;
     }
     /* I2C */
-    if ( (addr & ~0x3f) == 0xff008f00) {        
+    if ( (addr & ~0x3f) == 0xff008f00) {
         FB_DPRINTF("I2C write @%lx(%d) %lx\n", addr & 0x3f, size, value);
         return;
     }
     /* DSPI */
-    if ( (addr & ~0xff) == 0xff008a00) {        
+    if ( (addr & ~0xff) == 0xff008a00) {
         FB_DPRINTF("DSPI write @%lx(%d) %lx\n", addr & 0xff, size, value);
         return;
-    }    
+    }
     /* FEC */
     if ( (addr & ~0x3ff) == 0xff009000) {
         FB_DPRINTF("FEC0 write @%lx(%d) %lx\n", addr & 0x3ff, size, value);
