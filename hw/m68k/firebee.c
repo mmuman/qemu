@@ -16,18 +16,23 @@
  * This code is licensed under the GPL
  */
 
+#include "qemu/osdep.h"
+#include "cpu.h"
+#include "sysemu/sysemu.h"
+#include "sysemu/qtest.h"
+#include "sysemu/reset.h"
 #include "hw/hw.h"
 #include "hw/m68k/mcf.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "hw/block/flash.h"
-#include "hw/devices.h"
-#include "qemu/timer.h"
+#include "hw/irq.h"
 #include "hw/ptimer.h"
-#include "sysemu/sysemu.h"
+#include "qemu/timer.h"
+#include "qapi/error.h"
 #include "elf.h"
 #include "exec/address-spaces.h"
-#include "sysemu/qtest.h"
+#include "migration/vmstate.h"
 
 
 #define DEBUG_FB
@@ -297,15 +302,24 @@ static const MemoryRegionOps firebee_unmapped_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
+static void main_cpu_reset(void *opaque)
+{
+    M68kCPU *cpu = opaque;
+    CPUState *cs = CPU(cpu);
+
+    cpu_reset(cs);
+    cpu->env.aregs[7] = ldl_phys(cs->as, 0);
+    cpu->env.pc = ldl_phys(cs->as, 4);
+}
+
 
 /* Board init.  */
 
 
-static void firebee_m68k_init(QEMUMachineInitArgs *args)
+static void firebee_init(MachineState *machine)
 {
     ram_addr_t ram_size = RAM_SIZE;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
+    const char *kernel_filename = machine->kernel_filename;
     M68kCPU *cpu;
     CPUM68KState *env;
     MemoryRegion *address_space_mem =  get_system_memory();
@@ -326,14 +340,10 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     int be;
     qemu_irq *pic;
 
-    if (!cpu_model) {
-        cpu_model = "any";
-    }
-    cpu = cpu_m68k_init(cpu_model);
-    if (!cpu) {
-        fprintf(stderr, "Unable to find m68k CPU definition\n");
-        exit(1);
-    }
+    /* init CPUs */
+    cpu = M68K_CPU(cpu_create(machine->cpu_type));
+    qemu_register_reset(main_cpu_reset, cpu);
+
     env = &cpu->env;
 
     /* Initialize CPU registers.  */
@@ -345,12 +355,12 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     memory_region_add_subregion(address_space_mem, 0, unmapped);
 
     /* SDRAM at address zero */
-    memory_region_init_ram(ram, NULL, "firebee_sdram.ram", ram_size);
+    memory_region_init_ram(ram, NULL, "firebee_sdram.ram", ram_size, &error_abort);
     vmstate_register_ram_global(ram);
     memory_region_add_subregion(address_space_mem, 0, ram);
 
     /* On-Chip RAM.  */
-    memory_region_init_ram(ocram0, NULL, "firebee_ram0.ram", 0x1000);
+    memory_region_init_ram(ocram0, NULL, "firebee_ram0.ram", 0x1000, &error_abort);
     vmstate_register_ram_global(ocram0);
 
     memory_region_init_alias(ocram0a, NULL, "firebee_ram0a.ram", ocram0, 0x0, 0x1000);
@@ -359,7 +369,7 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     memory_region_init_alias(ocram0b, NULL, "firebee_ram0b.ram", ocram0, 0x0, 0x1000);
     memory_region_add_subregion(address_space_mem, 0x20000000, ocram0b);
 
-    memory_region_init_ram(ocram1, NULL, "firebee_ram1.ram", 0x1000);
+    memory_region_init_ram(ocram1, NULL, "firebee_ram1.ram", 0x1000, &error_abort);
     vmstate_register_ram_global(ocram1);
 
     memory_region_init_alias(ocram1a, NULL, "firebee_ram1a.ram", ocram1, 0x0, 0x1000);
@@ -369,17 +379,17 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     memory_region_add_subregion(address_space_mem, 0x20001000, ocram1b);
 
     /* 32Kb SRAM.  */
-    memory_region_init_ram(sram, NULL, "firebee_sram.ram", 0x8000);
+    memory_region_init_ram(sram, NULL, "firebee_sram.ram", 0x8000, &error_abort);
     vmstate_register_ram_global(sram);
     memory_region_add_subregion(address_space_mem, 0xff010000, sram);
 
     /* Internal peripherals.  */
     pic = mcf_intc_init(address_space_mem, 0xff000700, cpu);
 
-    mcf_psc_mm_init(address_space_mem, 0xff008600, pic[35], serial_hds[0]);
-    mcf_psc_mm_init(address_space_mem, 0xff008700, pic[34], serial_hds[1]);
-    mcf_psc_mm_init(address_space_mem, 0xff008800, pic[33], serial_hds[2]);
-    mcf_psc_mm_init(address_space_mem, 0xff008900, pic[32], serial_hds[3]);
+    mcf_psc_mm_init(0xff008600, pic[35], serial_hd(0));
+    mcf_psc_mm_init(0xff008700, pic[34], serial_hd(1));
+    mcf_psc_mm_init(0xff008800, pic[33], serial_hd(2));
+    mcf_psc_mm_init(0xff008900, pic[32], serial_hd(3));
 
     mcf_slt_mm_init(address_space_mem, 0xff000900, pic[54]);
     mcf_slt_mm_init(address_space_mem, 0xff000910, pic[53]);
@@ -398,9 +408,9 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     be = 0;
 #endif
 
-    if (!pflash_cfi02_register(FLASH_BASE, NULL, "firebee.flash", FLASH_SIZE,
-                               dinfo ? dinfo->bdrv : NULL, FLASH_SECTOR_SIZE,
-                               FLASH_SIZE / FLASH_SECTOR_SIZE, 1,
+    if (!pflash_cfi02_register(FLASH_BASE, "firebee.flash", FLASH_SIZE,
+                               dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
+                               FLASH_SECTOR_SIZE, 1,
                                2, 0x00BF, 0x236D, 0x0000, 0x0000,
                                0x5555, 0x2AAA, be)) {
         fprintf(stderr, "qemu: Error registering flash memory.\n");
@@ -409,11 +419,11 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
 
     /* Load kernel.  */
     if (kernel_filename) {
-        kernel_size = load_elf(kernel_filename, NULL, NULL, &elf_entry,
-                               NULL, NULL, 1, ELF_MACHINE, 0);
+        kernel_size = load_elf(kernel_filename, NULL, NULL, NULL, &elf_entry,
+                               NULL, NULL, NULL, 1, EM_68K, 0, 0);
         entry = elf_entry;
         if (kernel_size < 0) {
-            kernel_size = load_uimage(kernel_filename, &entry, NULL, NULL);
+            kernel_size = load_uimage(kernel_filename, &entry, NULL, NULL, NULL, NULL);
         }
         if (kernel_size < 0) {
             kernel_size = load_image_targphys(kernel_filename,
@@ -432,15 +442,26 @@ static void firebee_m68k_init(QEMUMachineInitArgs *args)
     env->pc = entry;
 }
 
-static QEMUMachine firebee_m68k_machine = {
-    .name = "firebee",
-    .desc = "Firebee",
-    .init = firebee_m68k_init,
-};
-
-static void firebee_m68k_machine_init(void)
+static void firebee_machine_class_init(ObjectClass *oc, void *data)
 {
-    qemu_register_machine(&firebee_m68k_machine);
+    MachineClass *mc = MACHINE_CLASS(oc);
+    mc->desc = "Atari ColdFire Project Firebee";
+    mc->init = firebee_init;
+    mc->default_cpu_type = M68K_CPU_TYPE_NAME("m5208"); /* FIXME: m5474 */
+    mc->max_cpus = 1;
+    mc->is_default = 0;
+    /*mc->block_default_type = IF_SCSI;*/
 }
 
-machine_init(firebee_m68k_machine_init);
+static const TypeInfo firebee_machine_typeinfo = {
+    .name       = MACHINE_TYPE_NAME("firebee"),
+    .parent     = TYPE_MACHINE,
+    .class_init = firebee_machine_class_init,
+};
+
+static void firebee_machine_register_types(void)
+{
+    type_register_static(&firebee_machine_typeinfo);
+}
+
+type_init(firebee_machine_register_types)
