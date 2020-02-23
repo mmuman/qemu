@@ -18,9 +18,7 @@ uint64_t mcf_psc_read(void *opaque, hwaddr addr,
 void mcf_psc_write(void *opaque, hwaddr addr,
                    uint64_t val, unsigned size);
 void *mcf_psc_init(qemu_irq irq, Chardev *chr);
-void mcf_psc_mm_init(struct MemoryRegion *sysmem,
-                     hwaddr base,
-                     qemu_irq irq, Chardev *chr);
+void mcf_psc_mm_init(hwaddr base, qemu_irq irq, Chardev *chr);
 
 /* mcf_intc.c */
 qemu_irq *mcf_intc_init(struct MemoryRegion *sysmem,

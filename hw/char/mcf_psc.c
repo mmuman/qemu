@@ -38,6 +38,8 @@ do { \
 #define FIFO_SIZE 512
 
 typedef struct {
+    SysBusDevice parent_obj;
+
     MemoryRegion iomem;
     uint8_t mr[2];      /* 0x00 R/W */
     uint16_t sr;        /* 0x04 R */
@@ -54,6 +56,9 @@ typedef struct {
     qemu_irq irq;
     CharBackend chr;
 } mcf_psc_state;
+
+#define TYPE_MCF_PSC "mcf-psc"
+#define MCF_PSC(obj) OBJECT_CHECK(mcf_psc_state, (obj), TYPE_MCF_PSC)
 
 /* PSC Status Register bits.  */
 #define MCF_PSC_RxRDY  (1 << 8)
@@ -247,8 +252,10 @@ void mcf_psc_write(void *opaque, hwaddr addr,
     mcf_psc_update(s);
 }
 
-static void mcf_psc_reset(mcf_psc_state *s)
+static void mcf_psc_reset(DeviceState *dev)
 {
+    mcf_psc_state *s = MCF_PSC(dev);
+
     s->rx_fifo_len = 0;
     s->mr[0] = 0;
     s->mr[1] = 0;
@@ -302,7 +309,7 @@ static void mcf_psc_receive(void *opaque, const uint8_t *buf, int size)
     mcf_psc_push_byte(s, buf[0]);
 }
 
-void *mcf_psc_init(qemu_irq irq, Chardev *chr)
+/*void *mcf_psc_init(qemu_irq irq, Chardev *chr)
 {
     mcf_psc_state *s;
 
@@ -315,7 +322,7 @@ void *mcf_psc_init(qemu_irq irq, Chardev *chr)
     }
     mcf_psc_reset(s);
     return s;
-}
+}*/
 
 static const MemoryRegionOps mcf_psc_ops = {
     .read = mcf_psc_read,
@@ -323,7 +330,7 @@ static const MemoryRegionOps mcf_psc_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
-void mcf_psc_mm_init(MemoryRegion *sysmem,
+/*void mcf_psc_mm_init(MemoryRegion *sysmem,
                       hwaddr base,
                       qemu_irq irq,
                       Chardev *chr)
@@ -333,4 +340,76 @@ void mcf_psc_mm_init(MemoryRegion *sysmem,
     s = mcf_psc_init(irq, chr);
     memory_region_init_io(&s->iomem, NULL, &mcf_psc_ops, s, "psc", 0x100);
     memory_region_add_subregion(sysmem, base, &s->iomem);
+}*/
+
+static void mcf_psc_instance_init(Object *obj)
+{
+    SysBusDevice *dev = SYS_BUS_DEVICE(obj);
+    mcf_psc_state *s = MCF_PSC(dev);
+
+    memory_region_init_io(&s->iomem, obj, &mcf_psc_ops, s, "psc", 0x100);
+    sysbus_init_mmio(dev, &s->iomem);
+
+    sysbus_init_irq(dev, &s->irq);
+}
+
+static void mcf_psc_realize(DeviceState *dev, Error **errp)
+{
+    mcf_psc_state *s = MCF_PSC(dev);
+
+    qemu_chr_fe_set_handlers(&s->chr, mcf_psc_can_receive, mcf_psc_receive,
+                             mcf_psc_event, NULL, s, NULL, true);
+}
+
+static Property mcf_psc_properties[] = {
+    DEFINE_PROP_CHR("chardev", mcf_psc_state, chr),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+static void mcf_psc_class_init(ObjectClass *oc, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->realize = mcf_psc_realize;
+    dc->reset = mcf_psc_reset;
+    device_class_set_props(dc, mcf_psc_properties);
+    set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
+}
+
+static const TypeInfo mcf_psc_info = {
+    .name          = TYPE_MCF_PSC,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(mcf_psc_state),
+    .instance_init = mcf_psc_instance_init,
+    .class_init    = mcf_psc_class_init,
+};
+
+static void mcf_psc_register(void)
+{
+    type_register_static(&mcf_psc_info);
+}
+
+type_init(mcf_psc_register)
+
+void *mcf_psc_init(qemu_irq irq, Chardev *chrdrv)
+{
+    DeviceState  *dev;
+
+    dev = qdev_new(TYPE_MCF_PSC);
+    if (chrdrv) {
+        qdev_prop_set_chr(dev, "chardev", chrdrv);
+    }
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, irq);
+
+    return dev;
+}
+
+void mcf_psc_mm_init(hwaddr base, qemu_irq irq, Chardev *chrdrv)
+{
+    DeviceState  *dev;
+
+    dev = mcf_psc_init(irq, chrdrv);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
 }
