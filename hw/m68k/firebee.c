@@ -91,23 +91,27 @@ static void mcf_slt_write(void *opaque, hwaddr addr,
         s->tcnt = value;
         s->sr &= ~MCF_SLT_ST;
         mcf_slt_update(s);
+        ptimer_transaction_begin(s->timer);
         ptimer_stop(s->timer);
         ptimer_set_limit(s->timer, s->tcnt, 1);
         if (s->cr & MCF_SLT_TEN) {
             ptimer_run(s->timer, !(s->cr & MCF_SLT_RUN));
         }
+        ptimer_transaction_commit(s->timer);
         break;
     case 0x4:
         s->cr &= ~(MCF_SLT_RUN | MCF_SLT_IEN | MCF_SLT_TEN);
         value &= (MCF_SLT_RUN | MCF_SLT_IEN | MCF_SLT_TEN);
         s->cr |= value;
 
+        ptimer_transaction_begin(s->timer);
         ptimer_stop(s->timer);
         if (s->cr & MCF_SLT_TEN) {
             ptimer_run(s->timer, !(s->cr & MCF_SLT_RUN));
         } else {
             ptimer_set_limit(s->timer, s->tcnt, 1);
         }
+        ptimer_transaction_commit(s->timer);
         mcf_slt_update(s);
         break;
     case 0x8:
@@ -163,14 +167,14 @@ static void mcf_slt_mm_init(MemoryRegion *address_space, hwaddr base,
                             qemu_irq irq)
 {
     mcf_slt_state *s;
-    QEMUBH *bh;
 
     s = (mcf_slt_state *)g_malloc0(sizeof(mcf_slt_state));
     memory_region_init_io(&s->iomem, NULL, &mcf_slt_ops, s, "mcf_slt", 0x10);
     memory_region_add_subregion(address_space, base, &s->iomem);
-    bh = qemu_bh_new(mcf_slt_trigger, s);
-    s->timer = ptimer_init(bh);
+    s->timer = ptimer_init(mcf_slt_trigger, s, PTIMER_POLICY_DEFAULT);
+    ptimer_transaction_begin(s->timer);
     ptimer_set_freq(s->timer, SYS_FREQ);
+    ptimer_transaction_commit(s->timer);
     s->irq = irq;
     mcf_slt_reset(s);
 }
