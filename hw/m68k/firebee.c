@@ -443,7 +443,6 @@ static void firebee_machine_class_init(ObjectClass *oc, void *data)
     mc->init = firebee_init;
     mc->default_cpu_type = M68K_CPU_TYPE_NAME("m5208"); /* FIXME: m5474 */
     mc->max_cpus = 1;
-    mc->is_default = 0;
     mc->default_ram_size = RAM_SIZE;
     mc->default_ram_id = "firebee_sdram.ram";
     /*mc->block_default_type = IF_SCSI;*/
