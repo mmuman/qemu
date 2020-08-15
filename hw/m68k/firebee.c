@@ -356,12 +356,10 @@ static void firebee_init(MachineState *machine)
 
     /* SDRAM at address zero */
     memory_region_init_ram(ram, NULL, "firebee_sdram.ram", ram_size, &error_abort);
-    vmstate_register_ram_global(ram);
     memory_region_add_subregion(address_space_mem, 0, ram);
 
     /* On-Chip RAM.  */
     memory_region_init_ram(ocram0, NULL, "firebee_ram0.ram", 0x1000, &error_abort);
-    vmstate_register_ram_global(ocram0);
 
     memory_region_init_alias(ocram0a, NULL, "firebee_ram0a.ram", ocram0, 0x0, 0x1000);
     memory_region_add_subregion(address_space_mem, 0xff100000, ocram0a);
@@ -370,7 +368,6 @@ static void firebee_init(MachineState *machine)
     memory_region_add_subregion(address_space_mem, 0x20000000, ocram0b);
 
     memory_region_init_ram(ocram1, NULL, "firebee_ram1.ram", 0x1000, &error_abort);
-    vmstate_register_ram_global(ocram1);
 
     memory_region_init_alias(ocram1a, NULL, "firebee_ram1a.ram", ocram1, 0x0, 0x1000);
     memory_region_add_subregion(address_space_mem, 0xff101000, ocram1a);
@@ -380,7 +377,6 @@ static void firebee_init(MachineState *machine)
 
     /* 32Kb SRAM.  */
     memory_region_init_ram(sram, NULL, "firebee_sram.ram", 0x8000, &error_abort);
-    vmstate_register_ram_global(sram);
     memory_region_add_subregion(address_space_mem, 0xff010000, sram);
 
     /* Internal peripherals.  */
