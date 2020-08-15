@@ -318,13 +318,12 @@ static void main_cpu_reset(void *opaque)
 
 static void firebee_init(MachineState *machine)
 {
-    ram_addr_t ram_size = RAM_SIZE;
+    ram_addr_t ram_size = machine->ram_size;
     const char *kernel_filename = machine->kernel_filename;
     M68kCPU *cpu;
     CPUM68KState *env;
     MemoryRegion *address_space_mem =  get_system_memory();
     MemoryRegion *unmapped = g_new(MemoryRegion, 1);
-    MemoryRegion *ram = g_new(MemoryRegion, 1);
     MemoryRegion *ocram0 = g_new(MemoryRegion, 1);
     MemoryRegion *ocram1 = g_new(MemoryRegion, 1);
     MemoryRegion *sram = g_new(MemoryRegion, 1);
@@ -355,8 +354,7 @@ static void firebee_init(MachineState *machine)
     memory_region_add_subregion(address_space_mem, 0, unmapped);
 
     /* SDRAM at address zero */
-    memory_region_init_ram(ram, NULL, "firebee_sdram.ram", ram_size, &error_abort);
-    memory_region_add_subregion(address_space_mem, 0, ram);
+    memory_region_add_subregion(address_space_mem, 0, machine->ram);
 
     /* On-Chip RAM.  */
     memory_region_init_ram(ocram0, NULL, "firebee_ram0.ram", 0x1000, &error_abort);
@@ -446,6 +444,8 @@ static void firebee_machine_class_init(ObjectClass *oc, void *data)
     mc->default_cpu_type = M68K_CPU_TYPE_NAME("m5208"); /* FIXME: m5474 */
     mc->max_cpus = 1;
     mc->is_default = 0;
+    mc->default_ram_size = RAM_SIZE;
+    mc->default_ram_id = "firebee_sdram.ram";
     /*mc->block_default_type = IF_SCSI;*/
 }
 
