@@ -49,6 +49,7 @@ do { } while (0)
 #define KERNEL_LOAD_ADDR 0x10000
 
 #define RAM_SIZE 0x20000000
+#define ROM_FILE    "firebee.rom"
 
 #define FLASH_BASE 0xe0000000
 #define FLASH_SECTOR_SIZE (128 * 1024)
@@ -322,7 +323,9 @@ static void firebee_init(MachineState *machine)
     const char *kernel_filename = machine->kernel_filename;
     M68kCPU *cpu;
     CPUM68KState *env;
+    CPUState *cs;
     MemoryRegion *address_space_mem =  get_system_memory();
+    MemoryRegion *rom = g_new(MemoryRegion, 1);
     MemoryRegion *unmapped = g_new(MemoryRegion, 1);
     MemoryRegion *ocram0 = g_new(MemoryRegion, 1);
     MemoryRegion *ocram1 = g_new(MemoryRegion, 1);
@@ -331,6 +334,7 @@ static void firebee_init(MachineState *machine)
     MemoryRegion *ocram1a = g_new(MemoryRegion, 1);
     MemoryRegion *ocram0b = g_new(MemoryRegion, 1);
     MemoryRegion *ocram1b = g_new(MemoryRegion, 1);
+    const char *bios_name = machine->firmware ?: ROM_FILE;
 
     int kernel_size;
     uint64_t elf_entry;
@@ -351,7 +355,7 @@ static void firebee_init(MachineState *machine)
     /* Unmapped */
     memory_region_init_io(unmapped, NULL, &firebee_unmapped_ops, NULL,
                           "firebee_unmapped.io", (1L << 32));
-    memory_region_add_subregion(address_space_mem, 0, unmapped);
+    //memory_region_add_subregion(address_space_mem, 0, unmapped);
 
     /* SDRAM at address zero */
     memory_region_add_subregion(address_space_mem, 0, machine->ram);
@@ -390,27 +394,32 @@ static void firebee_init(MachineState *machine)
 
     /* Flash */
     dinfo = drive_get(IF_PFLASH, 0, 0);
+#if 0
     if (!dinfo && !qtest_enabled()) {
         fprintf(stderr, "A flash image must be given with the "
                 "'pflash' parameter\n");
         exit(1);
     }
+#endif
+    if (dinfo) {
 
 #ifdef TARGET_WORDS_BIGENDIAN
-    be = 1;
+        be = 1;
 #else
-    be = 0;
+        be = 0;
 #endif
 
-    if (!pflash_cfi02_register(FLASH_BASE, "firebee.flash", FLASH_SIZE,
-                               dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
-                               FLASH_SECTOR_SIZE, 1,
-                               2, 0x00BF, 0x236D, 0x0000, 0x0000,
-                               0x5555, 0x2AAA, be)) {
-        fprintf(stderr, "qemu: Error registering flash memory.\n");
-        exit(1);
+        if (!pflash_cfi02_register(FLASH_BASE, "firebee.flash", FLASH_SIZE,
+                                dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
+                                FLASH_SECTOR_SIZE, 1,
+                                2, 0x00BF, 0x236D, 0x0000, 0x0000,
+                                0x5555, 0x2AAA, be)) {
+            fprintf(stderr, "qemu: Error registering flash memory.\n");
+            exit(1);
+        }
     }
 
+    cs = CPU(cpu);
     /* Load kernel.  */
     if (kernel_filename) {
         kernel_size = load_elf(kernel_filename, NULL, NULL, NULL, &elf_entry,
@@ -431,7 +440,22 @@ static void firebee_init(MachineState *machine)
             exit(1);
         }
     } else {
-        entry = FLASH_BASE;
+        uint8_t *ptr;
+
+        memory_region_init_rom(rom, NULL, ROM_FILE, FLASH_SIZE, &error_fatal);
+        memory_region_add_subregion(address_space_mem, FLASH_BASE, rom);
+
+        if (load_image_targphys(bios_name, FLASH_BASE, FLASH_SIZE) < 8) {
+            if (!qtest_enabled()) {
+                error_report("Failed to load firmware '%s'.", bios_name);
+            }
+        } else {
+            ptr = rom_ptr(FLASH_BASE, FLASH_SIZE);
+            fprintf(stderr, "qemu: @0: '%08x'\n",ldl_p(ptr));
+            //stl_phys(cs->as, 0, ldl_p(ptr));     /* reset initial SP */
+            stl_phys(cs->as, 4, ldl_p(ptr + 4)); /* reset initial PC */
+            entry = FLASH_BASE;
+        }
     }
     env->pc = entry;
 }
