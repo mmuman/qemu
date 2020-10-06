@@ -29,7 +29,7 @@
 #include "ui/console.h"
 #include "target/m68k/cpu.h"
 
-/* #define DEBUG_NEXT */
+#define DEBUG_NEXT
 #ifdef DEBUG_NEXT
 #define DPRINTF(fmt, ...) \
     do { printf("NeXT: " fmt , ## __VA_ARGS__); } while (0)
@@ -99,11 +99,19 @@ static const uint8_t rtc_ram3[32] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x13
 };
 */
+/*
 static const uint8_t rtc_ram2[32] = {
     0x94, 0x0f, 0x40, 0x03, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0xfb, 0x6d, 0x00, 0x00, 0x4b, 0x00,
     0x41, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x84, 0x7e,
+};
+*/
+static const uint8_t rtc_ram2[32] = {
+    0x94, 0x0f, 0x40, 0x03, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0xfb, 0x6d, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x7f,
 };
 
 #define SCR2_RTCLK 0x2
@@ -731,7 +739,7 @@ void next_irq(void *opaque, int number, int level)
     NeXTState *ns = NEXT_MACHINE(qdev_get_machine());
 
     /* first switch sets interupt status */
-    /* DPRINTF("IRQ %i\n",number); */
+    DPRINTF("IRQ %i\n",number);
     switch (number) {
     /* level 3 - floppy, kbd/mouse, power, ether rx/tx, scsi, clock */
     case NEXT_FD_I:
@@ -944,6 +952,7 @@ static void next_cube_init(MachineState *machine)
     /* still not sure if the rom should also be mapped at 0x0*/
     memory_region_init_rom(rom, NULL, "next.rom", 0x20000, &error_fatal);
     memory_region_add_subregion(sysmem, 0x01000000, rom);
+    //memory_region_add_subregion(sysmem, 0x00000000, rom);
     if (load_image_targphys(bios_name, 0x01000000, 0x20000) < 8) {
         if (!qtest_enabled()) {
             error_report("Failed to load firmware '%s'.", bios_name);
