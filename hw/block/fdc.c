@@ -51,7 +51,7 @@
 /********************************************************/
 /* debug Floppy devices */
 
-#define DEBUG_FLOPPY 0
+#define DEBUG_FLOPPY 1
 
 #define FLOPPY_DPRINTF(fmt, ...)                                \
     do {                                                        \
@@ -923,7 +923,7 @@ static uint32_t fdctrl_read (void *opaque, uint32_t reg)
         retval = fdctrl_read_statusB(fdctrl);
         break;
     case FD_REG_DOR:
-        retval = fdctrl_read_dor(fdctrl);
+        retval = fdctrl_read_dor(fdctrl);// & ~FD_DOR_DMAEN;
         break;
     case FD_REG_TDR:
         retval = fdctrl_read_tape(fdctrl);
@@ -994,6 +994,79 @@ static const MemoryRegionOps fdctrl_mem_ops = {
 static const MemoryRegionOps fdctrl_mem_strict_ops = {
     .read = fdctrl_read_mem,
     .write = fdctrl_write_mem,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
+static uint64_t next_fdctrl_read_mem (void *opaque, hwaddr reg,
+                                 unsigned ize)
+{
+    FDCtrl *fdctrl = opaque;
+    uint32_t retval;
+//exit(EXIT_FAILURE);
+    //while(1);//*(char *)NULL = 0;
+    switch (reg) {
+    case FD_REG_DOR:
+        retval = fdctrl_read(opaque, (uint32_t)reg);
+        retval ^= FD_DOR_DMAEN;
+        printf("next:read dor %02x\n", retval);
+        return retval;
+    case FD_REG_MSR:
+        retval = fdctrl_read(opaque, (uint32_t)reg);
+        retval &= ~FD_MSR_CMDBUSY;
+        printf("next:read msr %02x\n", retval);
+        return retval;
+    case 8: /* FLPCTL, cf. usr/include/nextdev/fd_reg.h */
+        retval = 0x00; /* 82077 (or not??), drive present */
+        if (fdctrl->dor & FD_DOR_MOTEN0) /* XXX */
+            retval |= 0x01; /* 1MB media TODO */
+        trace_fdc_ioport_read(reg, retval);
+        printf("next:read fdctl %02x\n", retval);
+        return retval;
+    default:
+        break;
+    }
+
+    return fdctrl_read(opaque, (uint32_t)reg);
+}
+
+static void next_fdctrl_write_mem (void *opaque, hwaddr reg,
+                              uint64_t value, unsigned size)
+{
+    /*FDCtrl *fdctrl = opaque;*/
+
+    //while(1);//*(char *)NULL = 0;
+    switch (reg) {
+    case FD_REG_DOR:
+        printf("next:write dor %02x\n", (unsigned char)value);
+        value ^= FD_DOR_DMAEN;
+        break;
+    case 8: /* FLPCTL, cf. usr/include/nextdev/fd_reg.h */
+        trace_fdc_ioport_write(reg, value);
+        printf("next:write fdctl %02x\n", (unsigned char)value);
+        if (value & 0x80) {
+            /* TODO: eject */;
+        }
+        if (!(value & 0x40)) {
+            /* TODO: select optical disk SCSI registers */;
+        printf("next:OD SEL !!!\n");
+        }
+        if (value & 0x20) {
+            /* TODO: reset */;
+        }
+        return;
+    default:
+        break;
+    }
+    fdctrl_write(opaque, (uint32_t)reg, value);
+}
+
+static const MemoryRegionOps fdctrl_mem_next_ops = {
+    .read = next_fdctrl_read_mem,
+    .write = next_fdctrl_write_mem,
     .endianness = DEVICE_NATIVE_ENDIAN,
     .valid = {
         .min_access_size = 1,
@@ -2615,6 +2688,27 @@ void sun4m_fdctrl_init(qemu_irq irq, hwaddr io_base,
     fdctrl_init_drives(&sys->state.bus, fds);
 }
 
+void next_fdctrl_init(qemu_irq irq, hwaddr io_base,
+                       DriveInfo **fds)
+{
+    FDCtrl *fdctrl;
+    DeviceState *dev;
+    FDCtrlSysBus *sys;
+
+    dev = qdev_new("next-fdc");
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    sys = SYSBUS_FDC(dev);
+    fdctrl = &sys->state;
+    (void)fdctrl;
+    fdctrl->dma_chann = -1;
+    //fdctrl->irq = irq;
+    sysbus_connect_irq(SYS_BUS_DEVICE(sys), 0, irq);
+    /*  */
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(sys), 0, io_base, 10);
+
+    fdctrl_init_drives(&sys->state.bus, fds);
+}
+
 static void fdctrl_realize_common(DeviceState *dev, FDCtrl *fdctrl,
                                   Error **errp)
 {
@@ -2719,6 +2813,19 @@ static void sun4m_fdc_initfn(Object *obj)
 
     memory_region_init_io(&fdctrl->iomem, obj, &fdctrl_mem_strict_ops,
                           fdctrl, "fdctrl", 0x08);
+    sysbus_init_mmio(sbd, &fdctrl->iomem);
+}
+
+static void next_fdc_initfn(Object *obj)
+{
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+    FDCtrlSysBus *sys = SYSBUS_FDC(obj);
+    FDCtrl *fdctrl = &sys->state;
+
+    fdctrl->dma_chann = -1;
+
+    memory_region_init_io(&fdctrl->iomem, obj, &fdctrl_mem_next_ops,
+                          fdctrl, "fdctrl", 0x0a);
     sysbus_init_mmio(sbd, &fdctrl->iomem);
 }
 
@@ -3007,6 +3114,32 @@ static const TypeInfo sun4m_fdc_info = {
     .class_init    = sun4m_fdc_class_init,
 };
 
+static Property next_fdc_properties[] = {
+    DEFINE_PROP_DRIVE("drive", FDCtrlSysBus, state.qdev_for_drives[0].blk),
+    DEFINE_PROP_SIGNED("fdtype", FDCtrlSysBus, state.qdev_for_drives[0].type,
+                        FLOPPY_DRIVE_TYPE_AUTO, qdev_prop_fdc_drive_type,
+                        FloppyDriveType),
+    DEFINE_PROP_SIGNED("fallback", FDCtrlISABus, state.fallback,
+                        FLOPPY_DRIVE_TYPE_144, qdev_prop_fdc_drive_type,
+                        FloppyDriveType),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+static void next_fdc_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_props(dc, next_fdc_properties);
+    set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
+}
+
+static const TypeInfo next_fdc_info = {
+    .name          = "next-fdc",
+    .parent        = TYPE_SYSBUS_FDC,
+    .instance_init = next_fdc_initfn,
+    .class_init    = next_fdc_class_init,
+};
+
 static void sysbus_fdc_common_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -3031,6 +3164,7 @@ static void fdc_register_types(void)
     type_register_static(&sysbus_fdc_type_info);
     type_register_static(&sysbus_fdc_info);
     type_register_static(&sun4m_fdc_info);
+    type_register_static(&next_fdc_info);
     type_register_static(&floppy_bus_info);
     type_register_static(&floppy_drive_info);
 }

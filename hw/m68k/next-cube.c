@@ -834,6 +834,12 @@ static void next_serial_irq(void *opaque, int n, int level)
     }
 }
 
+static void next_floppy_irq(void *opaque, int n, int level)
+{
+    printf("next_floppy_irq(,%d,%d)\n", n, level);
+    next_irq(opaque, NEXT_FD_I, level);
+}
+
 static void next_escc_init(M68kCPU *cpu)
 {
     qemu_irq *ser_irq = qemu_allocate_irqs(next_serial_irq, cpu, 2);
@@ -871,6 +877,8 @@ static void next_cube_init(MachineState *machine)
     const char *bios_name = machine->firmware ?: ROM_FILE;
     NeXTState *ns = NEXT_MACHINE(machine);
     DeviceState *dev;
+    DriveInfo *fds[MAX_FD];
+    int n;
 
     /* Initialize the cpu core */
     cpu = M68K_CPU(cpu_create(machine->cpu_type));
@@ -923,6 +931,14 @@ static void next_cube_init(MachineState *machine)
     dev = qdev_new(TYPE_NEXTKBD);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, 0x0200e000);
+
+    /* Floppy */
+    for (n = 0; n < MAX_FD; n++) {
+        fds[n] = drive_get(IF_FLOPPY, 0, n);
+    }
+    /* FIXME: we should enable DMA with a custom IsaDma device */
+    ns->fd_irq = qemu_allocate_irqs(next_floppy_irq, cpu, 1/*XXX*/);
+    next_fdctrl_init(ns->fd_irq[0], 0x02114100, fds);
 
     /* Load ROM here */
     /* still not sure if the rom should also be mapped at 0x0*/
