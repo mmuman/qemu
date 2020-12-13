@@ -1020,7 +1020,7 @@ static uint64_t next_fdctrl_read_mem (void *opaque, hwaddr reg,
         printf("next:read msr %02x\n", retval);
         return retval;
     case 8: /* FLPCTL, cf. usr/include/nextdev/fd_reg.h */
-        retval = 0x00; /* 82077 (or not??), drive present */
+        retval = 0x40; /* 82077 (or not??), drive present */
         if (fdctrl->dor & FD_DOR_MOTEN0) /* XXX */
             retval |= 0x01; /* 1MB media TODO */
         trace_fdc_ioport_read(reg, retval);
